@@ -483,45 +483,43 @@ Future AGI is an **open-source ecosystem** — each SDK is independently usable,
 <tr valign="top">
 <td>
 
-- [x] OpenTelemetry-native tracing
-- [x] 50+ evaluation metrics
-- [x] Agent Command Center (gateway)
-- [x] Voice agent simulations
-- [x] Agent IDE
-- [x] Prompt optimization (6 algos)
-- [x] ClickHouse analytics
-- [x] MCP server support
-- [x] Apache 2.0 licensing
-- [x] Error-feed root-cause v2
+- [x] Prompt optimization engine
+- [x] Taxonomy-based Feed Clustering
+- [x] Agent Runs in Dataset Experiments
+- [x] Simulate from Production Calls
+- [x] LiveKit Configuration via UI
+- [x] System Metric Filtering for Voice
+- [x] Agent Playground
+- [x] Dashboards
+- [x] Access platform via MCP
+- [x] Annotation Queues
+- [x] Command Center (Prism)
+- [x] Open source Future AGI stack
+- [x] Eval Explanation Output Size Control 
+
 
 </td>
 <td>
 
-- [ ] Public OSS launch 
-- [ ] Self-hosted Helm chart v1
-- [ ] AWS Marketplace listing
-- [ ] One-click cloud-deploy buttons
+- [ ] Agent Changelog & Diff View
+- [ ] Smart Queue Assignment
+- [ ] Essential Node Library for Agent Builder
+- [ ] Full Execution Tracing for Agents
+- [ ] Multi-modal Support for Agents
 
 </td>
 <td>
 
-- [ ] SSO (SAML + OIDC)
-- [ ] SCIM provisioning
-- [ ] Audit-log retention tiers
-- [ ] Distributed tracing across multi-agent graphs
-- [ ] Auto-tuned rubrics from human feedback
-- [ ] Per-tenant budgeting
-- [ ] Public benchmark harness + leaderboard
+- [ ] Agent Changelog & Diff View
+- [ ] Smart Queue Assignment
 
 </td>
 <td>
 
-- [ ] CUA eval suite
-- [ ] Emotion-aware voice scoring
-- [ ] On-device / air-gapped eval runtime
-- [ ] Prompt version control with branches
-- [ ] Federated evals across tenants
-- [ ] Marketplace for community evaluators
+- [ ] Import agents to Agent Playground
+- [ ] Simulating CUA agents
+- [ ] Simulating Coding agents
+- [ ] Scheduled Simulations
 
 </td>
 </tr>
