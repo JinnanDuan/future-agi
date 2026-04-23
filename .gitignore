@@ -163,6 +163,8 @@ dumps/
 *.log
 logs/
 **/logs/
+!frontend/src/**/logs/
+!frontend/src/**/logs/**
 **celerybeat-schedule**
 staticfiles/
 media/
