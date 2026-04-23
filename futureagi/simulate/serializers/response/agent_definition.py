@@ -1,0 +1,213 @@
+from django.conf import settings
+from rest_framework import serializers
+
+from simulate.models import AgentDefinition, AgentVersion
+from simulate.models.agent_definition import AgentTypeChoices
+
+
+class AgentDefinitionResponseSerializer(serializers.ModelSerializer):
+    """
+    Response serializer for AgentDefinition detail endpoints.
+    Used by: create, edit, restore, detail responses.
+    All fields are read-only — this is a pure output contract.
+    """
+
+    livekit_url = serializers.SerializerMethodField()
+    livekit_api_key = serializers.SerializerMethodField()
+    livekit_agent_name = serializers.SerializerMethodField()
+    livekit_config_json = serializers.SerializerMethodField()
+    livekit_max_concurrency = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AgentDefinition
+        fields = [
+            "id",
+            "agent_name",
+            "agent_type",
+            "contact_number",
+            "inbound",
+            "description",
+            "assistant_id",
+            "provider",
+            "language",
+            "languages",
+            "authentication_method",
+            "websocket_url",
+            "websocket_headers",
+            "workspace",
+            "knowledge_base",
+            "organization",
+            "api_key",
+            "observability_provider",
+            "created_at",
+            "updated_at",
+            "model",
+            "model_details",
+            "livekit_url",
+            "livekit_api_key",
+            "livekit_agent_name",
+            "livekit_config_json",
+            "livekit_max_concurrency",
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def _get_livekit_creds(obj):
+        try:
+            creds = obj.credentials
+        except AgentDefinition.credentials.RelatedObjectDoesNotExist:
+            return None
+        if not creds or creds.provider_type != "livekit":
+            return None
+        return creds
+
+    def get_livekit_url(self, obj):
+        creds = self._get_livekit_creds(obj)
+        return creds.server_url if creds else ""
+
+    def get_livekit_api_key(self, obj):
+        creds = self._get_livekit_creds(obj)
+        return creds.get_masked_api_key() if creds else ""
+
+    def get_livekit_agent_name(self, obj):
+        creds = self._get_livekit_creds(obj)
+        return creds.agent_name if creds else ""
+
+    def get_livekit_config_json(self, obj):
+        creds = self._get_livekit_creds(obj)
+        return creds.config_json if creds else None
+
+    def get_livekit_max_concurrency(self, obj):
+        creds = self._get_livekit_creds(obj)
+        return (
+            creds.max_concurrency if creds else settings.DEFAULT_LIVEKIT_MAX_CONCURRENCY
+        )
+
+
+class AgentDefinitionCreateResponseSerializer(serializers.Serializer):
+    """
+    Response serializer for POST /agent-definitions/create/.
+    Shape: {"message": "...", "agent": {...}}
+    """
+
+    message = serializers.CharField(read_only=True)
+    agent = AgentDefinitionResponseSerializer(read_only=True)
+
+
+class AgentDefinitionEditResponseSerializer(serializers.Serializer):
+    """
+    Response serializer for PUT /agent-definitions/{id}/edit/.
+    Shape: {"message": "...", "agent": {...}}
+    """
+
+    message = serializers.CharField(read_only=True)
+    agent = AgentDefinitionResponseSerializer(read_only=True)
+
+
+class AgentDefinitionListResponseSerializer(serializers.ModelSerializer):
+    """
+    Response serializer for GET /agent-definitions/ (list).
+    Includes latest_version and latest_version_id computed fields.
+    All fields are read-only.
+    """
+
+    latest_version = serializers.SerializerMethodField()
+    latest_version_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AgentDefinition
+        fields = [
+            "id",
+            "agent_name",
+            "agent_type",
+            "contact_number",
+            "inbound",
+            "description",
+            "assistant_id",
+            "provider",
+            "language",
+            "languages",
+            "websocket_url",
+            "websocket_headers",
+            "workspace",
+            "knowledge_base",
+            "organization",
+            "created_at",
+            "updated_at",
+            "latest_version",
+            "latest_version_id",
+            "model_details",
+            "model",
+        ]
+        read_only_fields = fields
+
+    def get_latest_version(self, obj):
+        """Get the latest version number for the agent."""
+        if hasattr(obj, "_latest_version"):
+            return obj._latest_version
+        latest_version = (
+            AgentVersion.objects.filter(agent_definition=obj)
+            .order_by("-version_number")
+            .values_list("version_number", flat=True)
+            .first()
+        )
+        return latest_version
+
+    def get_latest_version_id(self, obj):
+        """Get the latest version id for the agent."""
+        if hasattr(obj, "_latest_version_id"):
+            return obj._latest_version_id
+        latest_version = (
+            AgentVersion.objects.filter(agent_definition=obj)
+            .order_by("-version_number")
+            .values_list("id", flat=True)
+            .first()
+        )
+        return latest_version
+
+
+class AgentDefinitionDetailResponseSerializer(serializers.Serializer):
+    """
+    Response serializer for GET /agent-definitions/{id}/.
+    Shape: {**agent_data, "versions": [...], "active_version": {...}, "version_count": N}
+    """
+
+    # Agent fields are spread at top level via to_representation
+    versions = serializers.ListField(read_only=True)
+    active_version = serializers.DictField(read_only=True, allow_null=True)
+    version_count = serializers.IntegerField(read_only=True)
+
+
+class AgentDefinitionBulkDeleteResponseSerializer(serializers.Serializer):
+    """
+    Response serializer for DELETE /agent-definitions/ (bulk delete).
+    Shape: {"message": "...", "agents_updated": N, "versions_updated": N}
+    """
+
+    message = serializers.CharField(read_only=True)
+    agents_updated = serializers.IntegerField(read_only=True)
+    versions_updated = serializers.IntegerField(read_only=True)
+
+
+class AgentDefinitionDeleteResponseSerializer(serializers.Serializer):
+    """
+    Response serializer for DELETE /agent-definitions/{id}/delete/.
+    Shape: {"message": "..."}
+    """
+
+    message = serializers.CharField(read_only=True)
+
+
+class FetchAssistantResponseSerializer(serializers.Serializer):
+    """
+    Response serializer for POST fetch_assistant_from_provider.
+    Inner shape (wrapped by _gm.success_response):
+    {name, assistant_id, api_key, prompt, provider, commit_message}
+    """
+
+    name = serializers.CharField(read_only=True, allow_null=True)
+    assistant_id = serializers.CharField(read_only=True)
+    api_key = serializers.CharField(read_only=True)
+    prompt = serializers.CharField(read_only=True, allow_null=True)
+    provider = serializers.CharField(read_only=True)
+    commit_message = serializers.CharField(read_only=True, allow_null=True)

@@ -1,0 +1,294 @@
+import json
+import math
+import os
+from typing import Any
+
+import structlog
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+from rest_framework.viewsets import ModelViewSet
+from retell import Retell
+
+logger = structlog.get_logger(__name__)
+from accounts.utils import get_request_organization
+from simulate.models import AgentDefinition
+from tfc.utils.base_viewset import BaseModelViewSetMixinWithUserOrg
+from tfc.utils.error_codes import get_error_message
+from tfc.utils.general_methods import GeneralMethods
+from tracer.models.observability_provider import ProviderChoices
+from tracer.models.project import ProjectSourceChoices
+from tracer.serializers.observability_provider import ObservabilityProviderSerializer
+from tracer.services.observability_providers import ObservabilityService
+from tracer.utils.observability_provider import normalize_and_store_logs
+from tracer.utils.otel import get_or_create_project
+
+# Provider packages
+
+
+class ObservabilityProviderViewSet(BaseModelViewSetMixinWithUserOrg, ModelViewSet):
+    """
+    API endpoints for managing Observability Providers.
+    """
+
+    serializer_class = ObservabilityProviderSerializer
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        project_id = self.request.query_params.get("project_id")
+        if project_id:
+            queryset = queryset.filter(project_id=project_id)
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        try:
+            queryset = self.get_queryset()
+            total_count = queryset.count()
+
+            page_number = int(request.query_params.get("page_number", 0))
+            page_size = int(request.query_params.get("page_size", 20))
+
+            start = page_number * page_size
+            end = start + page_size
+
+            total_pages = math.ceil(total_count / page_size)
+            next_page_number = (
+                page_number + 1 if (page_number + 1) < total_pages else None
+            )
+
+            paginated_queryset = queryset[start:end]
+            serializer = self.get_serializer(paginated_queryset, many=True)
+
+            response = {
+                "metadata": {
+                    "total_count": total_count,
+                    "current_page": page_number,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "next_page": next_page_number,
+                },
+                "providers": serializer.data,
+            }
+
+            return self._gm.success_response(response)
+        except Exception as e:
+            logger.exception(f"Error listing observability providers: {e}")
+            return self._gm.bad_request(
+                get_error_message("ERROR_FETCHING_OBSERVABILITY_PROVIDERS")
+            )
+
+    def create(self, request, *args, **kwargs):
+        try:
+            serializer = self.get_serializer(data=request.data)
+            if not serializer.is_valid():
+                return self._gm.bad_request(serializer.errors)
+
+            project_name = serializer.validated_data["project_name"]
+
+            _org = get_request_organization(request)
+            project = get_or_create_project(
+                project_name=project_name,
+                organization_id=_org.id if _org else None,
+                project_type="observe",
+                user_id=str(request.user.id),
+                source=ProjectSourceChoices.SIMULATOR.value,
+            )
+
+            serializer.save(
+                project=project,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                workspace=getattr(request, "workspace", None),
+            )
+            return self._gm.success_response(serializer.data)
+        except Exception as e:
+            logger.exception(f"Error creating observability provider: {e}")
+            return self._gm.bad_request(get_error_message("FAILED_TO_CREATE_PROVIDER"))
+
+    def retrieve(self, request, *args, **kwargs):
+        try:
+            return super().retrieve(request, *args, **kwargs)
+        except Exception as e:
+            logger.exception(f"Error retrieving observability provider: {e}")
+            return self._gm.bad_request(
+                get_error_message("OBSERVABILITY_PROVIDER_NOT_FOUND")
+            )
+
+    def update(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance, data=request.data, partial=True)
+            if not serializer.is_valid():
+                return self._gm.bad_request(serializer.errors)
+            self.perform_update(serializer)
+            return self._gm.success_response(serializer.data)
+        except ValidationError as e:
+            return self._gm.bad_request(e.detail)
+        except Exception as e:
+            logger.exception(f"Error updating observability provider: {e}")
+            return self._gm.bad_request(
+                get_error_message("FAILED_TO_UPDATE_OBSERVABILITY_PROVIDER")
+            )
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+            self.perform_destroy(instance)
+            return self._gm.success_response(
+                "Observability provider deleted successfully."
+            )
+        except Exception as e:
+            logger.exception(f"Error deleting observability provider: {e}")
+            return self._gm.bad_request(
+                get_error_message("FAILED_TO_DELETE_OBSERVABILITY_PROVIDER")
+            )
+
+    def perform_create(self, serializer):
+        serializer.save(
+            organization=getattr(self.request, "organization", None)
+            or self.request.user.organization,
+            workspace=getattr(self.request, "workspace", None),
+        )
+
+    @action(detail=False, methods=["post"])
+    def verify_api_key(self, request):
+        try:
+            provider = request.data.get("provider")
+            api_key = request.data.get("api_key")
+            if provider in [
+                ProviderChoices.VAPI,
+                ProviderChoices.RETELL,
+                ProviderChoices.OTHERS,
+            ]:
+                status_code = ObservabilityService.verify_api_key(
+                    provider=provider,
+                    api_key=api_key,
+                )
+                if status_code == 200:
+                    return self._gm.success_response("API key verified successfully.")
+                else:
+                    return self._gm.bad_request("Invalid API key.")
+            # elif provider == ProviderChoices.ELEVEN_LABS:
+            #     return ObservabilityService.verify_api_key(
+            #         api_endpoint=ObservabilityRoutes.ELEVEN_LABS_CONVERSATIONS_URL.value,
+            #         api_key=api_key,
+            #     )
+            else:
+                return self._gm.bad_request(f"Invalid choice for provider: {provider}")
+        except Exception as e:
+            logger.exception(f"Error verifying API key: {e}")
+            return self._gm.bad_request(f"Error verifying API key: {e}")
+
+    @action(detail=False, methods=["post"])
+    def verify_assistant_id(self, request):
+        try:
+            assistant_id = request.data.get("assistant_id")
+            api_key = request.data.get("api_key")
+            provider = request.data.get("provider")
+            if provider in [
+                ProviderChoices.VAPI,
+                ProviderChoices.RETELL,
+                ProviderChoices.OTHERS,
+            ]:
+                status_code = ObservabilityService.verify_assistant_id(
+                    provider=provider,
+                    assistant_id=assistant_id,
+                    api_key=api_key,
+                )
+                if status_code == 200:
+                    return self._gm.success_response(
+                        "Assistant ID verified successfully."
+                    )
+                else:
+                    return self._gm.bad_request("Invalid assistant ID.")
+            else:
+                return self._gm.bad_request(f"Invalid choice for provider: {provider}")
+        except Exception as e:
+            logger.exception(f"Error verifying assistant ID: {e}")
+            return self._gm.bad_request(f"Error verifying assistant ID: {e}")
+
+
+class WebhookHandlerView(APIView):
+    _gm = GeneralMethods()
+    authentication_classes: list[Any] = []  # Disable authentication for webhook
+    permission_classes: list[Any] = []  # Disable permission checks
+
+    def get_api_key(self, agent_definition: AgentDefinition):
+        try:
+            api_key = None
+            if not agent_definition:
+                return None
+
+            agent_version = agent_definition.latest_version
+            if agent_version:
+                api_key = agent_version.configuration_snapshot.get("api_key")
+            else:
+                logger.warning(
+                    f"No agent version found for agent {agent_definition.id}"
+                )
+                return None
+
+            return api_key
+        except Exception as e:
+            logger.exception(f"Error getting webhook secret: {e}")
+            return None
+
+    def post(self, request):
+        try:
+            post_data = request.data
+            headers = request.headers
+
+            processed_count = 0
+            failed_count = 0
+
+            call = post_data.get("call")
+            agent_id = call.get("agent_id")
+
+            agent_definition_qs = AgentDefinition.objects.select_related(
+                "observability_provider"
+            ).filter(assistant_id=agent_id, observability_provider__enabled=True)
+
+            for agent_definition in agent_definition_qs.iterator(chunk_size=500):
+
+                # Retrieve webhook secret from agent version for agent_definition
+                api_key = self.get_api_key(agent_definition=agent_definition)
+
+                if not api_key:
+                    failed_count += 1
+                    error_message = f"No API key for agent: {agent_definition.id}"
+                    logger.warning(error_message)
+
+                    continue
+
+                # Initialize retell client
+                retell = Retell(api_key=api_key)
+
+                valid_signature = retell.verify(
+                    json.dumps(post_data, separators=(",", ":"), ensure_ascii=False),
+                    api_key=api_key,
+                    signature=str(headers.get("X-Retell-Signature")),
+                )
+
+                if valid_signature:
+                    # Create or update observation span
+                    normalize_and_store_logs.delay(
+                        body=post_data,
+                        agent_definition_id=agent_definition.id,
+                    )
+
+                processed_count += 1
+
+            if processed_count == 0:
+                logger.error("No matching agent definition found")
+                return self._gm.bad_request("No matching agent definition found")
+
+            return self._gm.success_response(
+                f"Logs processed successfully. \nProcessed: {processed_count} \nFailed: {failed_count}"
+            )
+
+        except Exception as e:
+            logger.exception(f"Error in webhook handler: {e}")
+            return self._gm.bad_request(f"Error processing webhook")

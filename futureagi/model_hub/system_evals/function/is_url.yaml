@@ -1,0 +1,34 @@
+eval_id: 150
+name: is_url
+description: Validates if text is a properly formatted URL with a valid scheme and network location.
+eval_tags:
+- Output Format
+- Output Validation
+visible_ui: true
+permissions:
+  allow_edit: false
+  allow_copy: true
+output_type_normalized: pass_fail
+pass_threshold: 0.5
+config:
+  required_keys:
+  - text
+  output: Pass/Fail
+  eval_type_id: CustomCodeEval
+  config: {}
+  config_params_desc:
+    text: The text to validate as a URL
+  code: |
+    def evaluate(input, output, expected, context, **kwargs):
+        from urllib.parse import urlparse
+        text = str(kwargs.get("text", output or "")).strip()
+        if not text:
+            return {"score": 0.0, "reason": "Empty text is not a valid URL"}
+        try:
+            parsed = urlparse(text)
+            if parsed.scheme and parsed.netloc:
+                return {"score": 1.0, "reason": f"Valid URL with scheme={parsed.scheme}"}
+            else:
+                return {"score": 0.0, "reason": "URL missing scheme or netloc"}
+        except Exception as e:
+            return {"score": 0.0, "reason": f"Not a valid URL: {e}"}

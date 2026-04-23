@@ -1,0 +1,65 @@
+import { getRandomId } from "src/utils/utils";
+import {
+  normalizeResponseFormat,
+  extractResponseSchema,
+} from "../AgentBuilder/NodeDrawer/nodeFormUtils";
+
+/**
+ * Maps a version's promptConfigSnapshot into a form-compatible config shape.
+ * Used when importing a prompt and when changing versions in the dropdown.
+ *
+ * @param {Object} version - A version object from the prompt-versions API
+ * @returns {Object} Config compatible with getDefaultValues / setValue
+ */
+export function mapVersionToFormConfig(version) {
+  const snapshot = version?.promptConfigSnapshot;
+  const cfg = snapshot?.configuration || {};
+
+  return {
+    outputFormat: cfg.outputFormat || snapshot?.outputFormat || "string",
+    modelConfig: {
+      model: cfg.model || "",
+      modelDetail: cfg.modelDetail || {},
+      toolChoice: cfg.tool_choice || "auto",
+      tools: cfg.tools || [],
+      responseFormat: normalizeResponseFormat(cfg.response_format),
+      responseSchema: extractResponseSchema(cfg.response_format),
+    },
+    messages: (() => {
+      const msgs = (snapshot?.messages || []).map((m) => ({
+        id: getRandomId(),
+        role: m.role,
+        content: m?.content,
+      }));
+      if (!msgs.some((m) => m.role === "system")) {
+        msgs.unshift({
+          id: getRandomId(),
+          role: "system",
+          content: [{ type: "text", text: "" }],
+        });
+      }
+      if (!msgs.some((m) => m.role === "user")) {
+        msgs.push({
+          id: getRandomId(),
+          role: "user",
+          content: [{ type: "text", text: "" }],
+        });
+      }
+      return msgs;
+    })(),
+    payload: {
+      promptConfig: [
+        {
+          configuration: {
+            temperature: cfg.temperature,
+            maxTokens: cfg.max_tokens,
+            topP: cfg.top_p,
+            frequencyPenalty: cfg.frequencyPenalty,
+            presencePenalty: cfg.presencePenalty,
+            ...(cfg.reasoning && { reasoning: cfg.reasoning }),
+          },
+        },
+      ],
+    },
+  };
+}

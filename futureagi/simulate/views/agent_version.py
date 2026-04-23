@@ -1,0 +1,525 @@
+from drf_yasg.utils import swagger_auto_schema
+from rest_framework import status
+from rest_framework.exceptions import NotFound
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from model_hub.models.develop_dataset import KnowledgeBaseFile
+from simulate.models import AgentDefinition, AgentVersion, CallExecution
+from simulate.serializers.requests.agent_version import (
+    AgentVersionCreateRequestSerializer,
+)
+from simulate.serializers.response.agent_definition import (
+    AgentDefinitionResponseSerializer,
+)
+from simulate.serializers.response.agent_version import (
+    AgentVersionActivateResponseSerializer,
+    AgentVersionCreateResponseSerializer,
+    AgentVersionDeleteResponseSerializer,
+    AgentVersionListResponseSerializer,
+    AgentVersionResponseSerializer,
+    AgentVersionRestoreResponseSerializer,
+)
+from simulate.serializers.test_execution import CallExecutionSerializer
+from simulate.utils.eval_summary import (
+    _build_template_statistics,
+    _calculate_final_template_summaries,
+    _get_completed_call_executions_for_agent_version,
+    _get_eval_config_for_agent_version,
+)
+from tfc.utils.error_codes import get_error_message
+from tfc.utils.general_methods import GeneralMethods
+from tfc.utils.pagination import ExtendedPageNumberPagination
+from tracer.utils.observability_provider import create_observability_provider
+
+
+class AgentVersionListView(APIView):
+    """
+    API View to list all versions of an agent definition.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        responses={200: AgentVersionListResponseSerializer(many=True)},
+    )
+    def get(self, request, agent_id, *args, **kwargs):
+        """
+        Get all versions of a specific agent definition.
+        """
+        try:
+            agent = AgentDefinition.objects.get(
+                id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                deleted=False,
+            )
+
+            versions = agent.get_version_history()
+
+            paginator = ExtendedPageNumberPagination()
+            result_page = paginator.paginate_queryset(versions, request)
+
+            serializer = AgentVersionListResponseSerializer(result_page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        except AgentDefinition.DoesNotExist:
+            return Response(
+                {"error": "Agent definition not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except NotFound:
+            raise
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to retrieve agent versions: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class CreateAgentVersionView(APIView):
+    """
+    API View to create a new version of an agent definition.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        request_body=AgentVersionCreateRequestSerializer,
+        responses={201: AgentVersionCreateResponseSerializer},
+    )
+    def post(self, request, agent_id, *args, **kwargs):
+        """
+        Create a new version of an agent definition.
+        """
+        try:
+            agent = AgentDefinition.objects.get(
+                id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+            )
+
+            # Validate request through request serializer
+            req_serializer = AgentVersionCreateRequestSerializer(data=request.data)
+            if not req_serializer.is_valid():
+                return Response(
+                    {
+                        "error": "Invalid data for agent update",
+                        "details": req_serializer.errors,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            validated = req_serializer.validated_data
+            commit_message = validated.get("commit_message", "")
+            observability_enabled = validated.get("observability_enabled", False)
+
+            # Update agent definition fields directly from validated data
+            update_fields = [
+                "agent_name",
+                "agent_type",
+                "description",
+                "provider",
+                "api_key",
+                "assistant_id",
+                "authentication_method",
+                "language",
+                "languages",
+                "contact_number",
+                "inbound",
+                "model",
+                "model_details",
+            ]
+            changed = False
+            for field in update_fields:
+                if field in validated:
+                    setattr(agent, field, validated[field])
+                    changed = True
+
+            # LiveKit fields are NOT model columns on AgentDefinition; they
+            # live on the related ProviderCredentials row. Route them
+            # through the same sync helper used by AgentDefinitionSerializer
+            # so changes (e.g. max_concurrency) are persisted before the
+            # version snapshot is taken below.
+            from simulate.serializers.agent_definition import (
+                AgentDefinitionSerializer,
+                ProviderCredentialsInput,
+            )
+
+            creds_input = ProviderCredentialsInput(
+                provider=validated.get("provider") or agent.provider or "",
+                api_key=validated.get("api_key"),
+                assistant_id=validated.get("assistant_id"),
+                livekit_url=validated.get("livekit_url"),
+                livekit_api_key=validated.get("livekit_api_key"),
+                livekit_api_secret=validated.get("livekit_api_secret"),
+                livekit_agent_name=validated.get("livekit_agent_name"),
+                livekit_config_json=validated.get("livekit_config_json"),
+                livekit_max_concurrency=validated.get("livekit_max_concurrency"),
+            )
+            AgentDefinitionSerializer._sync_provider_credentials(agent, creds_input)
+            # Drop the cached `credentials` related-object so the snapshot
+            # builder in create_version() reads the freshly-saved row.
+            try:
+                del agent.credentials
+            except AttributeError:
+                pass
+
+            if "knowledge_base" in validated:
+                kb_id = validated["knowledge_base"]
+                if kb_id is not None:
+                    # Validate knowledge base belongs to organization
+                    organization = (
+                        getattr(request, "organization", None)
+                        or request.user.organization
+                    )
+                    if not KnowledgeBaseFile.objects.filter(
+                        id=kb_id, organization=organization
+                    ).exists():
+                        return Response(
+                            {
+                                "error": "Invalid data for agent update",
+                                "details": {
+                                    "knowledge_base": [
+                                        "Knowledge base not found in your organization."
+                                    ]
+                                },
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                agent.knowledge_base_id = kb_id
+                changed = True
+            if changed:
+                agent.save()
+            provider = agent.observability_provider
+
+            if provider:
+                is_project_deleted = provider.project.deleted
+                if is_project_deleted:
+                    agent.observability_provider = None
+                    agent.save()
+                else:
+                    provider.enabled = observability_enabled
+                    provider.save()
+            else:
+                if observability_enabled:
+                    provider = create_observability_provider(
+                        enabled=True,
+                        user_id=str(request.user.id),
+                        organization=getattr(request, "organization", None)
+                        or request.user.organization,
+                        workspace=getattr(request.user, "workspace", None),
+                        project_name=agent.agent_name,
+                        provider=agent.provider,
+                    )
+                    agent.observability_provider = provider
+                    agent.save()
+
+            version = agent.create_version(
+                description=agent.description,
+                commit_message=commit_message,
+                status=AgentVersion.StatusChoices.ACTIVE,
+            )
+
+            response_data = {
+                "message": "Agent version created successfully",
+                "version": AgentVersionResponseSerializer(version).data,
+            }
+            return Response(response_data, status=status.HTTP_201_CREATED)
+
+        except AgentDefinition.DoesNotExist:
+            return Response(
+                {"error": "Agent definition not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to create agent version: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class AgentVersionDetailView(APIView):
+    """
+    API View to retrieve a specific agent version.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        responses={200: AgentVersionResponseSerializer},
+    )
+    def get(self, request, agent_id, version_id, *args, **kwargs):
+        """
+        Get details of a specific agent version.
+        """
+        try:
+            agent = AgentDefinition.objects.get(
+                id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                deleted=False,
+            )
+
+            version = AgentVersion.objects.get(id=version_id, agent_definition=agent)
+
+            serializer = AgentVersionResponseSerializer(version)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except AgentDefinition.DoesNotExist:
+            return Response(
+                {"error": "Agent definition not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except AgentVersion.DoesNotExist:
+            return Response(
+                {"error": "Agent version not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to retrieve agent version: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ActivateAgentVersionView(APIView):
+    """
+    API View to activate a specific agent version.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        responses={200: AgentVersionActivateResponseSerializer},
+    )
+    def post(self, request, agent_id, version_id, *args, **kwargs):
+        """
+        Activate a specific agent version.
+        """
+        try:
+            agent = AgentDefinition.objects.get(
+                id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                deleted=False,
+            )
+
+            version = AgentVersion.objects.get(id=version_id, agent_definition=agent)
+            version.activate()
+
+            response_data = {
+                "message": "Agent version activated successfully",
+                "version": AgentVersionResponseSerializer(version).data,
+            }
+            return Response(response_data, status=status.HTTP_200_OK)
+
+        except AgentDefinition.DoesNotExist:
+            return Response(
+                {"error": "Agent definition not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except AgentVersion.DoesNotExist:
+            return Response(
+                {"error": "Agent version not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to activate agent version: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class DeleteAgentVersionView(APIView):
+    """
+    API View to delete an agent version (soft delete).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        responses={200: AgentVersionDeleteResponseSerializer},
+    )
+    def delete(self, request, agent_id, version_id, *args, **kwargs):
+        """
+        Soft delete an agent version.
+        """
+        try:
+            agent = AgentDefinition.objects.get(
+                id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                deleted=False,
+            )
+
+            version = AgentVersion.objects.get(id=version_id, agent_definition=agent)
+
+            if version.is_active:
+                active_versions = AgentVersion.objects.filter(
+                    agent_definition=agent, status="active"
+                ).exclude(id=version_id)
+
+                if not active_versions.exists():
+                    return Response(
+                        {
+                            "error": "Cannot delete the only active version. Please activate another version first."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            version.delete()
+
+            response_data = {"message": "Agent version deleted successfully"}
+            return Response(
+                AgentVersionDeleteResponseSerializer(response_data).data,
+                status=status.HTTP_200_OK,
+            )
+
+        except AgentDefinition.DoesNotExist:
+            return Response(
+                {"error": "Agent definition not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except AgentVersion.DoesNotExist:
+            return Response(
+                {"error": "Agent version not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to delete agent version: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class RestoreAgentVersionView(APIView):
+    """
+    API View to restore an agent definition from a specific version.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        responses={200: AgentVersionRestoreResponseSerializer},
+    )
+    def post(self, request, agent_id, version_id, *args, **kwargs):
+        """
+        Restore agent definition from a specific version.
+        """
+        try:
+            agent = AgentDefinition.objects.get(
+                id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                deleted=False,
+            )
+
+            version = AgentVersion.objects.get(id=version_id, agent_definition=agent)
+
+            restored_agent = version.restore_from_snapshot()
+
+            response_data = {
+                "message": "Agent definition restored successfully from version",
+                "agent": AgentDefinitionResponseSerializer(restored_agent).data,
+                "version": AgentVersionResponseSerializer(version).data,
+            }
+            return Response(response_data, status=status.HTTP_200_OK)
+
+        except AgentDefinition.DoesNotExist:
+            return Response(
+                {"error": "Agent definition not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except AgentVersion.DoesNotExist:
+            return Response(
+                {"error": "Agent version not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to restore agent version: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class AgentVersionEvalSummaryView(APIView):
+    """
+    API View to get the eval summary of an agent version.
+    """
+
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    @swagger_auto_schema(
+        responses={200: "Evaluation summary for the agent version"},
+    )
+    def get(self, request, agent_id, version_id, *args, **kwargs):
+        """
+        Get the eval summary of an agent version.
+        """
+        try:
+            version = AgentVersion.objects.get(
+                id=version_id,
+                agent_definition__id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                deleted=False,
+            )
+
+            eval_configs = _get_eval_config_for_agent_version(version)
+
+            if not eval_configs:
+                return Response([], status=status.HTTP_200_OK)
+
+            call_executions = _get_completed_call_executions_for_agent_version(version)
+            template_stats = _build_template_statistics(eval_configs, call_executions)
+            final_data = _calculate_final_template_summaries(template_stats)
+
+            return self._gm.success_response(final_data)
+
+        except Exception:
+            return self._gm.internal_server_error_response(
+                get_error_message("UNABLE_TO_FETCH_EVAL_SUMMARY")
+            )
+
+
+class AgentVersionCallExecutionView(APIView):
+    """
+    API View to get the call executions of an agent version.
+    """
+
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    @swagger_auto_schema(
+        responses={200: CallExecutionSerializer(many=True)},
+    )
+    def get(self, request, agent_id, version_id, *args, **kwargs):
+        """
+        Get the call executions of an agent version.
+        """
+        try:
+            version = AgentVersion.objects.get(
+                id=version_id,
+                agent_definition__id=agent_id,
+                organization=getattr(request, "organization", None)
+                or request.user.organization,
+                deleted=False,
+            )
+
+            call_executions = CallExecution.objects.filter(
+                agent_version=version, status="completed", eval_outputs__isnull=False
+            ).exclude(eval_outputs={})
+
+            paginator = ExtendedPageNumberPagination()
+            result_page = paginator.paginate_queryset(call_executions, request)
+            serializer = CallExecutionSerializer(result_page, many=True)
+
+            return paginator.get_paginated_response(serializer.data)
+
+        except NotFound:
+            raise
+        except Exception:
+            return self._gm.internal_server_error_response(
+                get_error_message("UNABLE_TO_FETCH_CALL_EXECUTIONS")
+            )

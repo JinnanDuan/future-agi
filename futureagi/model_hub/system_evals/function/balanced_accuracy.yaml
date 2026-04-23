@@ -1,0 +1,38 @@
+eval_id: 184
+name: balanced_accuracy
+description: Computes balanced accuracy (average recall per class). Handles imbalanced datasets better than standard accuracy.
+eval_tags:
+- NLP Metrics
+- Output Validation
+visible_ui: true
+permissions: {allow_edit: false, allow_copy: true}
+output_type_normalized: percentage
+pass_threshold: 0.5
+config:
+  required_keys: [output, expected]
+  output: score
+  eval_type_id: CustomCodeEval
+  config: {}
+  config_params_desc: {output: Predicted labels, expected: True labels}
+  code: |
+    def evaluate(input, output, expected, context, **kwargs):
+        import json
+        def _p(v):
+            if isinstance(v, list): return [str(x).lower() for x in v]
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    if isinstance(p, list): return [str(x).lower() for x in p]
+                except: pass
+                return [v.strip().lower()]
+            return [str(v).lower()]
+        preds, labels = _p(kwargs.get("output", output)), _p(kwargs.get("expected", expected))
+        if len(preds) != len(labels) or not labels: return {"score": 0.0, "reason": "Invalid input"}
+        classes = sorted(set(labels))
+        recalls = []
+        for c in classes:
+            tp = sum(1 for p,l in zip(preds,labels) if l==c and p==c)
+            tot = sum(1 for l in labels if l==c)
+            recalls.append(tp/tot if tot > 0 else 0.0)
+        ba = sum(recalls)/len(recalls) if recalls else 0.0
+        return {"score": float(ba), "reason": f"Balanced Accuracy: {ba:.4f} ({len(classes)} classes)"}

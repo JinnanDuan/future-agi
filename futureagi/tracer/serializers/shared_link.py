@@ -1,0 +1,101 @@
+from rest_framework import serializers
+
+from tracer.models.shared_link import (
+    AccessType,
+    ResourceType,
+    SharedLink,
+    SharedLinkAccess,
+)
+
+
+class SharedLinkAccessSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SharedLinkAccess
+        fields = ["id", "email", "user", "granted_by", "created_at"]
+        read_only_fields = ["id", "user", "granted_by", "created_at"]
+
+
+class SharedLinkListSerializer(serializers.ModelSerializer):
+    access_count = serializers.SerializerMethodField()
+    share_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SharedLink
+        fields = [
+            "id",
+            "resource_type",
+            "resource_id",
+            "token",
+            "access_type",
+            "is_active",
+            "expires_at",
+            "created_by",
+            "created_at",
+            "access_count",
+            "share_url",
+        ]
+        read_only_fields = fields
+
+    def get_access_count(self, obj):
+        return obj.access_list.filter(deleted=False).count()
+
+    def get_share_url(self, obj):
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(f"/shared/{obj.token}")
+        return f"/shared/{obj.token}"
+
+
+class SharedLinkCreateSerializer(serializers.Serializer):
+    resource_type = serializers.ChoiceField(choices=ResourceType.choices)
+    resource_id = serializers.CharField(max_length=255)
+    access_type = serializers.ChoiceField(
+        choices=AccessType.choices, default=AccessType.RESTRICTED
+    )
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+    emails = serializers.ListField(
+        child=serializers.EmailField(),
+        required=False,
+        default=list,
+        help_text="Emails to grant access to (for restricted links).",
+    )
+
+
+class SharedLinkUpdateSerializer(serializers.Serializer):
+    access_type = serializers.ChoiceField(choices=AccessType.choices, required=False)
+    is_active = serializers.BooleanField(required=False)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class AddAccessSerializer(serializers.Serializer):
+    emails = serializers.ListField(child=serializers.EmailField(), min_length=1)
+
+
+class SharedLinkDetailSerializer(serializers.ModelSerializer):
+    """Full detail including ACL list."""
+
+    access_list = SharedLinkAccessSerializer(many=True, read_only=True)
+    share_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SharedLink
+        fields = [
+            "id",
+            "resource_type",
+            "resource_id",
+            "token",
+            "access_type",
+            "is_active",
+            "expires_at",
+            "created_by",
+            "created_at",
+            "access_list",
+            "share_url",
+        ]
+        read_only_fields = fields
+
+    def get_share_url(self, obj):
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(f"/shared/{obj.token}")
+        return f"/shared/{obj.token}"

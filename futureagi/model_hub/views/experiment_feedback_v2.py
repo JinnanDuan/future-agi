@@ -1,0 +1,461 @@
+import structlog
+from agentic_eval.core.embeddings.embedding_manager import EmbeddingManager
+from django.core.exceptions import ValidationError
+from django.db.models import Q
+from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+
+from evaluations.constants import FUTUREAGI_EVAL_TYPES
+from model_hub.models.choices import CellStatus, SourceChoices, StatusType
+from model_hub.models.develop_dataset import Cell, Column
+from model_hub.models.evals_metric import Feedback, UserEvalMetric
+from model_hub.models.experiments import ExperimentsTable
+from model_hub.serializers.develop_dataset import FeedbackSerializer
+from model_hub.views.eval_runner import EvaluationRunner
+from model_hub.views.utils.constants import EVAL_OUTPUT_TYPES
+from tfc.utils.error_codes import get_error_message
+from tfc.utils.general_methods import GeneralMethods
+
+logger = structlog.get_logger(__name__)
+
+
+def _get_experiment_or_error(experiment_id, organization, gm):
+    """Validate experiment exists, belongs to org, and has a snapshot dataset."""
+    experiment = ExperimentsTable.objects.filter(
+        id=experiment_id,
+        dataset__organization=organization,
+        deleted=False,
+    ).first()
+    if not experiment:
+        return None, gm.bad_request("Experiment not found.")
+    if not experiment.snapshot_dataset_id:
+        return None, gm.bad_request("Experiment has no snapshot dataset.")
+    return experiment, None
+
+
+class ExperimentFeedbackGetTemplateV2View(APIView):
+    """Get evaluation template details for rendering the feedback form."""
+
+    _gm = GeneralMethods()
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, experiment_id):
+        try:
+            organization = (
+                getattr(request, "organization", None) or request.user.organization
+            )
+            experiment, err = _get_experiment_or_error(
+                experiment_id, organization, self._gm
+            )
+            if err:
+                return err
+
+            user_eval_metric_id = request.query_params.get("user_eval_metric_id")
+            if not user_eval_metric_id:
+                return self._gm.bad_request(
+                    get_error_message("USER_EVAL_METRIC_ID_REQUIRED")
+                )
+
+            try:
+                user_eval_metric = UserEvalMetric.objects.get(id=user_eval_metric_id)
+            except (UserEvalMetric.DoesNotExist, ValidationError):
+                return self._gm.bad_request(
+                    get_error_message("MISSING_USER_EVAL_METRIC_ID")
+                )
+
+            eval_template = user_eval_metric.template
+            if not eval_template:
+                return self._gm.not_found(get_error_message("EVAL_TEMP_NOT_FOUND"))
+
+            template_data = {
+                "output_type": eval_template.config.get("output"),
+                "eval_description": eval_template.description,
+                "eval_name": eval_template.name,
+                "user_eval_name": user_eval_metric.name,
+            }
+
+            if template_data["output_type"] == EVAL_OUTPUT_TYPES["PASS_FAIL"]:
+                template_data["choices"] = ["Passed", "Failed"]
+
+            elif template_data["output_type"] == EVAL_OUTPUT_TYPES["CHOICES"]:
+                if (
+                    user_eval_metric.config
+                    and isinstance(user_eval_metric.config, dict)
+                    and "config" in user_eval_metric.config
+                    and "choices" in user_eval_metric.config["config"]
+                    and user_eval_metric.config["config"]["choices"]
+                ):
+                    template_data["choices"] = user_eval_metric.config["config"][
+                        "choices"
+                    ]
+                    template_data["multi_choice"] = user_eval_metric.config[
+                        "config"
+                    ].get("multi_choice", False)
+
+                elif hasattr(eval_template, "choices") and eval_template.choices:
+                    template_data["choices"] = eval_template.choices
+                    template_data["multi_choice"] = eval_template.config.get(
+                        "multi_choice", False
+                    )
+
+                else:
+                    template_data["choices"] = []
+                    template_data["multi_choice"] = False
+
+            return self._gm.success_response(template_data)
+
+        except Exception as e:
+            logger.exception(f"Error fetching feedback template: {str(e)}")
+            return self._gm.internal_server_error_response(
+                get_error_message("FAILED_TO_GET_USER_EVAL_METRIC")
+            )
+
+
+class ExperimentFeedbackCreateV2View(APIView):
+    """Create a feedback record scoped to an experiment."""
+
+    _gm = GeneralMethods()
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, experiment_id):
+        try:
+            organization = (
+                getattr(request, "organization", None) or request.user.organization
+            )
+            experiment, err = _get_experiment_or_error(
+                experiment_id, organization, self._gm
+            )
+            if err:
+                return err
+
+            serializer = FeedbackSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            feedback = serializer.save(
+                user=request.user,
+                organization=organization,
+                workspace=getattr(request, "workspace", None),
+            )
+
+            return self._gm.success_response({"id": feedback.id})
+
+        except (ValidationError, DRFValidationError):
+            return self._gm.bad_request(get_error_message("FAILED_TO_CREATE_FEEDBACK"))
+        except Exception as e:
+            logger.exception(f"Error creating experiment feedback: {str(e)}")
+            return self._gm.internal_server_error_response(
+                get_error_message("FAILED_TO_CREATE_FEEDBACK")
+            )
+
+
+class ExperimentFeedbackDetailsV2View(APIView):
+    """Get previous feedback details for a metric+row in an experiment."""
+
+    _gm = GeneralMethods()
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, experiment_id):
+        try:
+            organization = (
+                getattr(request, "organization", None) or request.user.organization
+            )
+            experiment, err = _get_experiment_or_error(
+                experiment_id, organization, self._gm
+            )
+            if err:
+                return err
+
+            user_eval_metric_id = request.query_params.get("user_eval_metric_id")
+            row_id = request.query_params.get("row_id")
+
+            queryset = Feedback.objects.select_related("user").filter(deleted=False)
+
+            if user_eval_metric_id:
+                queryset = queryset.filter(user_eval_metric_id=user_eval_metric_id)
+            if row_id:
+                queryset = queryset.filter(row_id=row_id)
+
+            queryset = queryset.order_by("-created_at")
+
+            feedback_data = []
+            for feedback in queryset:
+                feedback_data.append(
+                    {
+                        "id": str(feedback.id),
+                        "value": feedback.value,
+                        "comment": feedback.explanation,
+                        "created_at": feedback.created_at.isoformat(),
+                        "action_type": feedback.action_type,
+                    }
+                )
+
+            return self._gm.success_response(
+                {"feedback": feedback_data, "total_count": len(feedback_data)}
+            )
+
+        except Exception as e:
+            logger.exception(f"Error fetching experiment feedback details: {str(e)}")
+            return self._gm.internal_server_error_response(
+                get_error_message("FAILED_TO_GET_FEEDBACKS")
+            )
+
+
+class ExperimentFeedbackSubmitV2View(APIView):
+    """Submit feedback action — triggers temporal eval rerun for experiments."""
+
+    _gm = GeneralMethods()
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, experiment_id):
+        try:
+            organization = (
+                getattr(request, "organization", None) or request.user.organization
+            )
+            experiment, err = _get_experiment_or_error(
+                experiment_id, organization, self._gm
+            )
+            if err:
+                return err
+
+            action_type = request.data.get("action_type")
+            feedback_id = request.data.get("feedback_id")
+            user_eval_metric_id = request.data.get("user_eval_metric_id")
+            value = request.data.get("value") if request.data.get("value") else None
+            explanation = (
+                request.data.get("explanation")
+                if request.data.get("explanation")
+                else None
+            )
+
+            if not action_type or not user_eval_metric_id or not feedback_id:
+                return self._gm.bad_request(
+                    get_error_message("MISSING_METRIC_ID_FEEDBACK_ID_AND_ACTION_TYPE")
+                )
+
+            valid_actions = [
+                "retune",
+                "recalculate_row",
+                "recalculate_dataset",
+                "retune_recalculate",
+            ]
+            if action_type not in valid_actions:
+                return self._gm.bad_request(
+                    f"Invalid action_type. Must be one of: {', '.join(valid_actions)}"
+                )
+
+            # Load feedback
+            feedback = Feedback.objects.get(id=feedback_id, organization=organization)
+            feedback.action_type = action_type
+
+            row_id = str(feedback.row_id)
+
+            # Load eval column and dataset from snapshot
+            eval_column = Column.objects.get(id=feedback.source_id)
+            snapshot_dataset_id = str(experiment.snapshot_dataset_id)
+
+            try:
+                user_eval_metric = UserEvalMetric.objects.get(id=user_eval_metric_id)
+            except UserEvalMetric.DoesNotExist:
+                return self._gm.bad_request(
+                    get_error_message("MISSING_USER_EVAL_METRIC_ID")
+                )
+
+            feedback.eval_template = user_eval_metric.template
+            feedback.value = value if value else feedback.value
+            feedback.explanation = explanation if explanation else feedback.explanation
+            feedback.save()
+
+            # Build row_dict for embedding
+            row_cells = Cell.objects.filter(
+                row_id=feedback.row_id,
+                dataset_id=snapshot_dataset_id,
+                deleted=False,
+            ).select_related("column")
+
+            row_dict = {}
+            for cell in row_cells:
+                column_id = str(cell.column.id)
+                if column_id != str(eval_column.id):
+                    row_dict[column_id] = cell.value
+
+            row_dict["feedback_comment"] = feedback.explanation
+            row_dict["feedback_value"] = feedback.value
+
+            # Embed feedback for RAG few-shot
+            futureagi_eval = (
+                user_eval_metric.template.config.get("eval_type_id")
+                in FUTUREAGI_EVAL_TYPES
+            )
+            runner = EvaluationRunner(
+                user_eval_metric.template.config.get("eval_type_id"),
+                format_output=True,
+                futureagi_eval=futureagi_eval,
+            )
+
+            required_field, mapping = runner._get_required_fields_and_mappings(
+                user_eval_metric=user_eval_metric
+            )
+            embedding_manager = EmbeddingManager()
+            embedding_manager.parallel_process_metadata(
+                eval_id=user_eval_metric.template.id,
+                metadatas=row_dict,
+                inputs_formater=required_field,
+                organization_id=organization.id,
+                workspace_id=(
+                    experiment.dataset.workspace.id
+                    if experiment.dataset.workspace
+                    else None
+                ),
+            )
+            embedding_manager.close()
+
+            # Handle actions
+            if action_type == "retune":
+                return self._gm.success_response(
+                    {
+                        "message": "Metric queued for retuning",
+                        "action_type": action_type,
+                        "user_eval_metric_id": str(user_eval_metric_id),
+                    }
+                )
+
+            # For recalculate actions, determine affected columns and trigger temporal
+            recalculate_row_only = action_type in (
+                "recalculate_row",
+                "retune_recalculate",
+            )
+            row_ids = [row_id] if recalculate_row_only else []
+
+            workflow_id = self._trigger_eval_rerun(
+                experiment=experiment,
+                eval_column=eval_column,
+                snapshot_dataset_id=snapshot_dataset_id,
+                row_ids=row_ids,
+            )
+
+            message = (
+                "Row queued for recalculation"
+                if recalculate_row_only
+                else "Dataset queued for recalculation"
+            )
+
+            return self._gm.success_response(
+                {
+                    "message": message,
+                    "action_type": action_type,
+                    "user_eval_metric_id": str(user_eval_metric_id),
+                    "workflow_id": workflow_id,
+                }
+            )
+
+        except Feedback.DoesNotExist:
+            return self._gm.bad_request("Feedback not found.")
+        except Column.DoesNotExist:
+            return self._gm.bad_request("Evaluation column not found.")
+        except Exception as e:
+            logger.exception(f"Error submitting experiment feedback: {str(e)}")
+            return self._gm.internal_server_error_response(
+                get_error_message("FAILED_TO_CREATE_FEEDBACK")
+            )
+
+    def _trigger_eval_rerun(
+        self, experiment, eval_column, snapshot_dataset_id, row_ids
+    ):
+        """Identify affected eval columns, reset state, and trigger temporal workflow."""
+        from tfc.temporal.experiments import start_rerun_cells_v2_workflow
+
+        source = eval_column.source
+        source_id = eval_column.source_id
+
+        if source in (
+            SourceChoices.EXPERIMENT_EVALUATION.value,
+            SourceChoices.EXPERIMENT_EVALUATION_TAGS.value,
+        ):
+            # Per-EDT eval: source_id = "{edt_id}-{col_id}-sourceid-{metric_id}"
+            left, metric_id = source_id.split("-sourceid-")
+            edt_id = left[:36]
+
+            # Find all eval columns for this EDT + metric
+            eval_column_ids = list(
+                Column.objects.filter(
+                    source_id__startswith=edt_id,
+                    source_id__endswith=f"-sourceid-{metric_id}",
+                    source__in=[
+                        SourceChoices.EXPERIMENT_EVALUATION.value,
+                        SourceChoices.EXPERIMENT_EVALUATION_TAGS.value,
+                    ],
+                    dataset_id=snapshot_dataset_id,
+                    deleted=False,
+                ).values_list("id", flat=True)
+            )
+
+            # Reset columns and cells
+            self._reset_state(eval_column_ids, snapshot_dataset_id, row_ids, experiment)
+
+            workflow_id = start_rerun_cells_v2_workflow(
+                experiment_id=str(experiment.id),
+                dataset_id=snapshot_dataset_id,
+                prompt_config_ids=[],
+                agent_config_ids=[],
+                row_ids=row_ids,
+                eval_template_ids=[metric_id],
+                eval_only=True,
+                edt_ids=[edt_id],
+            )
+
+        elif source in (
+            SourceChoices.EVALUATION.value,
+            SourceChoices.EVALUATION_TAGS.value,
+        ):
+            # Base eval: source_id = str(metric_id)
+            metric_id = source_id
+
+            eval_column_ids = list(
+                Column.objects.filter(
+                    source_id=metric_id,
+                    source__in=[
+                        SourceChoices.EVALUATION.value,
+                        SourceChoices.EVALUATION_TAGS.value,
+                    ],
+                    dataset_id=snapshot_dataset_id,
+                    deleted=False,
+                ).values_list("id", flat=True)
+            )
+
+            self._reset_state(eval_column_ids, snapshot_dataset_id, row_ids, experiment)
+
+            workflow_id = start_rerun_cells_v2_workflow(
+                experiment_id=str(experiment.id),
+                dataset_id=snapshot_dataset_id,
+                prompt_config_ids=[],
+                agent_config_ids=[],
+                row_ids=row_ids,
+                eval_template_ids=[metric_id],
+                eval_only=True,
+                base_eval_only=True,
+            )
+
+        else:
+            raise ValueError(f"Unsupported column source for feedback rerun: {source}")
+
+        return workflow_id
+
+    def _reset_state(self, eval_column_ids, snapshot_dataset_id, row_ids, experiment):
+        """Reset columns and cells to RUNNING before triggering workflow."""
+        Column.objects.filter(id__in=eval_column_ids).update(
+            status=StatusType.RUNNING.value
+        )
+
+        cell_filter = Q(
+            column_id__in=eval_column_ids,
+            dataset_id=snapshot_dataset_id,
+        )
+        if row_ids:
+            cell_filter &= Q(row_id__in=row_ids)
+
+        Cell.objects.filter(cell_filter).update(
+            status=CellStatus.RUNNING.value, value=""
+        )
+
+        experiment.status = StatusType.RUNNING.value
+        experiment.save(update_fields=["status"])

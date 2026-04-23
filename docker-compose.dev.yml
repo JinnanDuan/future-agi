@@ -1,0 +1,177 @@
+# ============================================================================
+# Dev overlay — for Future AGI engineers, not external OSS users.
+#
+# Adds to docker-compose.yml:
+#   - volume mounts for hot reload (backend + worker)
+#   - per-queue workers (tasks_s / tasks_l / tasks_xl / trace_ingestion /
+#     agent_compass) so queue-specific behavior can be tested
+#   - Temporal UI + admin tools
+#   - FAST_STARTUP=true to skip migrations on every boot
+#   - DB ports exposed on 0.0.0.0 so host tools (DBeaver, Datagrip) can connect
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# To run against the private-base (ECR) image instead of rebuilding from
+# `Dockerfile.oss` each pull, override `dockerfile: Dockerfile.oss` →
+# `dockerfile: Dockerfile` on `backend` + `worker` (or set up an alias).
+# ============================================================================
+
+x-dev-worker-base: &dev-worker-base
+  build:
+    context: ./futureagi
+    dockerfile: Dockerfile.oss
+  image: futureagi/backend:local
+  working_dir: /app/backend
+  volumes:
+    - ./futureagi:/app/backend
+  depends_on:
+    temporal:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+
+services:
+  # --------------------------------------------------------------------------
+  # Hot reload — replace the built-in code with live-mounted source
+  # --------------------------------------------------------------------------
+
+  backend:
+    volumes:
+      - ./futureagi:/app/backend
+    environment:
+      FAST_STARTUP: "true"
+
+  # --------------------------------------------------------------------------
+  # Single all-queue worker from the OSS compose is disabled; use per-queue
+  # workers below instead. Profile keeps it defined but inactive.
+  # --------------------------------------------------------------------------
+
+  worker:
+    profiles: ["oss-only"]
+
+  # --------------------------------------------------------------------------
+  # Per-queue Temporal workers (production-like topology)
+  # --------------------------------------------------------------------------
+
+  worker-default:
+    <<: *dev-worker-base
+    environment:
+      SERVICE_TYPE: temporal-worker
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: default
+      FAST_STARTUP: "true"
+      TEMPORAL_MAX_CONCURRENT_ACTIVITIES: ${TEMPORAL_DEFAULT_MAX_ACTIVITIES:-100}
+      TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS: ${TEMPORAL_DEFAULT_MAX_WORKFLOWS:-100}
+
+  worker-tasks-s:
+    <<: *dev-worker-base
+    environment:
+      SERVICE_TYPE: temporal-worker
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: tasks_s
+      FAST_STARTUP: "true"
+      TEMPORAL_MAX_CONCURRENT_ACTIVITIES: ${TEMPORAL_TASKS_S_MAX_ACTIVITIES:-200}
+      TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS: ${TEMPORAL_TASKS_S_MAX_WORKFLOWS:-200}
+
+  worker-tasks-l:
+    <<: *dev-worker-base
+    environment:
+      SERVICE_TYPE: temporal-worker
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: tasks_l
+      FAST_STARTUP: "true"
+      TEMPORAL_MAX_CONCURRENT_ACTIVITIES: ${TEMPORAL_TASKS_L_MAX_ACTIVITIES:-50}
+      TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS: ${TEMPORAL_TASKS_L_MAX_WORKFLOWS:-50}
+
+  worker-tasks-xl:
+    <<: *dev-worker-base
+    environment:
+      SERVICE_TYPE: temporal-worker
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: tasks_xl
+      FAST_STARTUP: "true"
+      TEMPORAL_MAX_CONCURRENT_ACTIVITIES: ${TEMPORAL_TASKS_XL_MAX_ACTIVITIES:-10}
+      TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS: ${TEMPORAL_TASKS_XL_MAX_WORKFLOWS:-20}
+
+  worker-trace-ingestion:
+    <<: *dev-worker-base
+    environment:
+      SERVICE_TYPE: temporal-worker
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: trace_ingestion
+      FAST_STARTUP: "true"
+      TEMPORAL_MAX_CONCURRENT_ACTIVITIES: ${TEMPORAL_TRACE_MAX_ACTIVITIES:-100}
+      TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS: ${TEMPORAL_TRACE_MAX_WORKFLOWS:-100}
+
+  worker-agent-compass:
+    <<: *dev-worker-base
+    environment:
+      SERVICE_TYPE: temporal-worker
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: agent_compass
+      FAST_STARTUP: "true"
+      TEMPORAL_MAX_CONCURRENT_ACTIVITIES: ${TEMPORAL_COMPASS_MAX_ACTIVITIES:-50}
+      TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS: ${TEMPORAL_COMPASS_MAX_WORKFLOWS:-50}
+
+  # --------------------------------------------------------------------------
+  # Expose data-store ports publicly so host tools can connect
+  # --------------------------------------------------------------------------
+
+  postgres:
+    ports: !override
+      - "${PG_PORT:-5432}:5432"
+
+  clickhouse:
+    ports: !override
+      - "${CH_HTTP_PORT:-8123}:8123"
+      - "${CH_PORT:-9000}:9000"
+
+  redis:
+    ports: !override
+      - "${REDIS_PORT:-6379}:6379"
+
+  minio:
+    ports: !override
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+
+  temporal:
+    ports: !override
+      - "${TEMPORAL_PORT:-7233}:7233"
+
+  # --------------------------------------------------------------------------
+  # Temporal UI + admin CLI for workflow inspection
+  # --------------------------------------------------------------------------
+
+  temporal-ui:
+    image: temporalio/ui:2.43.3
+    ports:
+      - "${TEMPORAL_UI_PORT:-8085}:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000,http://localhost:8000
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  temporal-admin-tools:
+    image: temporalio/admin-tools
+    environment:
+      TEMPORAL_CLI_ADDRESS: temporal:7233
+    stdin_open: true
+    tty: true
+    depends_on:
+      temporal:
+        condition: service_healthy

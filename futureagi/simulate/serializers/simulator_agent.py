@@ -1,0 +1,67 @@
+from rest_framework import serializers
+
+from agentic_eval.core_evals.run_prompt.litellm_models import LiteLLMModelManager
+from model_hub.models.choices import ProviderLogoUrls
+from simulate.models import SimulatorAgent
+
+
+class SimulatorAgentSerializer(serializers.ModelSerializer):
+    """Serializer for SimulatorAgent model."""
+
+    logo_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SimulatorAgent
+        fields = [
+            "id",
+            "name",
+            "prompt",
+            "voice_provider",
+            "voice_name",
+            "interrupt_sensitivity",
+            "conversation_speed",
+            "finished_speaking_sensitivity",
+            "model",
+            "llm_temperature",
+            "max_call_duration_in_minutes",
+            "initial_message_delay",
+            "initial_message",
+            "created_at",
+            "updated_at",
+            "organization",
+            "deleted",
+            "deleted_at",
+            "logo_url",
+        ]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+            "organization",
+            "deleted",
+            "deleted_at",
+            "logo_url",
+        ]
+
+    def get_logo_url(self, obj):
+        """Get the logo URL for the model provider"""
+        try:
+            if obj.model:
+                # Get the provider from the model name
+                model_manager = LiteLLMModelManager(obj.model)
+                provider = model_manager.get_provider(obj.model)
+                return ProviderLogoUrls.get_url_by_provider(provider)
+        except (ValueError, Exception):
+            pass
+        return None
+
+    def create(self, validated_data):
+        """Create a new SimulatorAgent instance"""
+        # Set organization from request context
+        request = self.context.get("request")
+        if request and hasattr(request.user, "organization"):
+            validated_data["organization"] = (
+                getattr(request, "organization", None) or request.user.organization
+            )
+
+        return SimulatorAgent.objects.create(**validated_data)

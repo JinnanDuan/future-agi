@@ -1,0 +1,571 @@
+import json
+from collections import ChainMap
+from datetime import datetime
+from typing import List
+
+from django.db import models
+from django.db.models import Count, F, Max, Min, Q, Sum
+from django.db.models.functions import Coalesce
+
+from simulate.models import CallExecution
+from simulate.models.chat_message import ChatMessageModel
+from simulate.pydantic_schemas.chat import ChatRole
+from simulate.serializers.chat_message import ChatMessageSerializer
+from tracer.models.observation_span import ObservationSpan
+from tracer.models.trace import Trace
+from tracer.utils.otel import CallAttributes, ConversationAttributes
+
+RECORDING_ATTR_KEYS = {
+    "stereo": f"{ConversationAttributes.CONVERSATION_RECORDING}.{ConversationAttributes.STEREO}",
+    "mono_combined": f"{ConversationAttributes.CONVERSATION_RECORDING}.{ConversationAttributes.MONO_COMBINED}",
+    "mono_customer": f"{ConversationAttributes.CONVERSATION_RECORDING}.{ConversationAttributes.MONO_CUSTOMER}",
+    "mono_assistant": f"{ConversationAttributes.CONVERSATION_RECORDING}.{ConversationAttributes.MONO_ASSISTANT}",
+}
+
+
+def fetch_base_session_metrics(session_id: str):
+
+    if not session_id:
+        raise ValueError("Session ID is required")
+
+    # Calculate session-level aggregates
+    base_session_aggregates = ObservationSpan.objects.filter(
+        trace__session_id=session_id
+    ).aggregate(
+        start_time=Min("start_time"),
+        end_time=Max("end_time"),
+        total_tokens=Coalesce(
+            Sum(F("total_tokens"), output_field=models.IntegerField()),
+            0,
+        ),
+        total_traces=Count("trace_id", distinct=True),
+        total_tools_count=Count(
+            "id",
+            filter=Q(observation_type="tool"),
+            distinct=False,
+        ),
+    )
+
+    base_session_duration = (
+        base_session_aggregates["end_time"] - base_session_aggregates["start_time"]
+    )
+    if not base_session_duration:
+        raise ValueError("Session duration is required")
+
+    base_session_duration = base_session_duration.total_seconds()
+
+    # Coalesce(..., 0) and Count() guarantee non-null integers
+    base_session_metrics = {
+        "duration": base_session_duration,
+        "tokens": base_session_aggregates["total_tokens"],
+        "turn_count": base_session_aggregates["total_traces"],
+        "tools_count": base_session_aggregates["total_tools_count"],
+    }
+
+    return base_session_metrics
+
+
+def convert_trace_to_chat_messages(traces: List[Trace]):
+    if not traces or len(traces) == 0:
+        return []
+
+    chat_messages = []
+    for trace in traces:
+        input = trace.input
+        output = trace.output
+        if not input or not output:
+            continue
+
+        if not isinstance(input, str):
+            input = json.dumps(input)
+        if not isinstance(output, str):
+            output = json.dumps(output)
+
+        chat_messages.append(
+            {
+                "role": ChatRole.USER,
+                "messages": [input],
+                "created_at": trace.created_at,
+            }
+        )
+        chat_messages.append(
+            {
+                "role": ChatRole.ASSISTANT,
+                "messages": [output],
+                "created_at": trace.created_at,
+            }
+        )
+
+    return chat_messages
+
+
+def fetch_call_execution_metrics(call_execution: CallExecution):
+
+    call_execution_metrics = (
+        call_execution.conversation_metrics_data
+        if call_execution.conversation_metrics_data
+        else {}
+    )
+    latency_ms = call_execution_metrics.get("avg_latency_ms", 0)
+    tokens = call_execution_metrics.get("output_tokens", 0)
+    turn_count = call_execution_metrics.get("turn_count", 0)
+
+    tool_call_metrics = fetch_tool_calls(call_execution, ChatRole.ASSISTANT)
+
+    if latency_ms > 0:
+        latency_ms = latency_ms / 1000
+
+    call_execution_metrics = {
+        "duration": latency_ms,
+        "turn_count": turn_count,
+        "tokens": tokens,
+        "tools_count": tool_call_metrics.get("no_of_tool_calls", 0),
+    }
+
+    return call_execution_metrics
+
+
+def fetch_tool_calls(call_execution: CallExecution, role: ChatRole):
+
+    chat_messages = ChatMessageModel.objects.filter(
+        call_execution=call_execution, role=role, deleted=False
+    ).order_by("created_at")
+
+    no_of_tool_calls = 0
+    tool_calls = []
+
+    for chat_message in chat_messages:
+        content = chat_message.content
+        if content and len(content) > 0:
+
+            for item in content:
+                if (
+                    item.get("role") == role
+                    and item.get("tool_calls")
+                    and len(item.get("tool_calls")) > 0
+                ):
+                    no_of_tool_calls += len(item.get("tool_calls"))
+                    tool_calls.extend(item.get("tool_calls"))
+
+    return {
+        "no_of_tool_calls": no_of_tool_calls,
+        "tool_calls": tool_calls,
+    }
+
+
+def fetch_base_session_transcripts(session_id: str):
+    if not session_id:
+        raise ValueError("Session ID is required")
+
+    traces = Trace.objects.filter(session_id=session_id, deleted=False).order_by(
+        "created_at"
+    )
+    base_session_transcripts = convert_trace_to_chat_messages(traces)
+    return base_session_transcripts
+
+
+def fetch_call_execution_transcripts(call_execution: CallExecution):
+    if not call_execution:
+        raise ValueError("Call execution is required")
+
+    chat_messages = ChatMessageModel.objects.filter(
+        call_execution=call_execution,
+        role__in=[ChatRole.USER, ChatRole.ASSISTANT],
+        deleted=False,
+    ).order_by("created_at")
+    chat_messages = ChatMessageSerializer(chat_messages, many=True).data
+
+    return chat_messages
+
+
+def fetch_comparison_transcripts(call_execution: CallExecution, session_id: str):
+    if not call_execution or not session_id:
+        raise ValueError("Call execution and session ID are required")
+
+    base_session_transcripts = fetch_base_session_transcripts(session_id)
+    comparison_call_transcripts = fetch_call_execution_transcripts(call_execution)
+
+    return {
+        "base_session_transcripts": base_session_transcripts,
+        "comparison_call_transcripts": comparison_call_transcripts,
+    }
+
+
+def _build_metric_comparisons(
+    base_metrics: dict, comparison_metrics: dict
+) -> list[dict]:
+    """Compute percentage-change comparisons between base and comparison metric dicts."""
+    result = []
+    for key in comparison_metrics:
+        base_value = base_metrics.get(key)
+        comparison_value = comparison_metrics.get(key)
+        if base_value is None or comparison_value is None:
+            continue
+        change = comparison_value - base_value
+        pct = None if base_value == 0 else change / base_value * 100
+        result.append(
+            {
+                "metric": key,
+                "value": comparison_value,
+                "percentage_change": pct,
+                "change": change,
+            }
+        )
+    return result
+
+
+def fetch_comparison_metrics(call_execution: CallExecution, session_id: str):
+
+    if not call_execution or not session_id:
+        raise ValueError("Call execution and session ID are required")
+
+    base_session_metrics = fetch_base_session_metrics(session_id)
+    comparison_call_metrics = fetch_call_execution_metrics(call_execution)
+
+    return _build_metric_comparisons(base_session_metrics, comparison_call_metrics)
+
+
+def fetch_voice_conversation_span(trace_id: str) -> dict:
+    """
+    Fetch the conversation span for a voice trace (single DB query).
+    Returns the raw span dict with span_attributes and eval_attributes.
+    """
+    if not trace_id:
+        raise ValueError("Trace ID is required")
+
+    span = (
+        ObservationSpan.objects.filter(
+            trace_id=trace_id,
+            observation_type="conversation",
+        )
+        .values("span_attributes", "eval_attributes")
+        .first()
+    )
+
+    if not span:
+        raise ValueError(f"No conversation span found for trace {trace_id}")
+
+    return span
+
+
+def merge_span_attrs(span: dict) -> ChainMap:
+    """Merge span_attributes and eval_attributes, with span_attributes taking precedence.
+
+    Returns a ChainMap view over both dicts (no copying).
+    span_attributes is first (where new voice metrics live),
+    eval_attributes is fallback (legacy/backfilled data).
+    """
+    span_attrs = span["span_attributes"] or {}
+    eval_attrs = span["eval_attributes"] or {}
+    return ChainMap(span_attrs, eval_attrs)
+
+
+def fetch_voice_trace_baseline_metrics(trace_id: str, _span: dict | None = None):
+    """
+    Fetch baseline metrics from a voice trace's conversation span.
+    Accepts an optional pre-fetched span to avoid redundant DB queries.
+    """
+    span = _span or fetch_voice_conversation_span(trace_id)
+    attrs = merge_span_attrs(span)
+    return _extract_voice_metrics_from_attrs(attrs)
+
+
+def _extract_voice_metrics_from_attrs(attrs: dict) -> dict:
+    """Extract voice-specific call metrics from span attributes."""
+    return {
+        "duration": attrs.get(CallAttributes.DURATION, 0) or 0,
+        "total_turns": attrs.get(CallAttributes.TOTAL_TURNS, 0) or 0,
+        "avg_agent_latency_ms": attrs.get("avg_agent_latency_ms", 0) or 0,
+        "user_wpm": attrs.get(CallAttributes.USER_WPM, 0) or 0,
+        "bot_wpm": attrs.get(CallAttributes.BOT_WPM, 0) or 0,
+        "talk_ratio": attrs.get(CallAttributes.TALK_RATIO, 0) or 0,
+    }
+
+
+_TOOL_ROLES = {"tool", "tool_calls", "tool_call_result"}
+
+
+def _is_tool_call_message(msg: dict) -> bool:
+    """Return True if the message represents a tool call or tool call result."""
+    if msg.get("role", "") in _TOOL_ROLES:
+        return True
+    if msg.get("toolCalls") or msg.get("tool_calls"):
+        return True
+    return False
+
+
+def parse_voice_span_transcripts(attrs: dict) -> list[dict]:
+    """
+    Parse transcripts from a voice span's attributes dict.
+    Tries provider_transcript -> flattened keys -> raw_log.messages.
+    Returns list of {role, messages} dicts.
+    """
+    provider_transcript = attrs.get("provider_transcript", [])
+    if not isinstance(provider_transcript, list):
+        provider_transcript = []
+
+    transcripts = []
+
+    if provider_transcript:
+        for msg in provider_transcript:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if (
+                role in ("user", "assistant")
+                and content
+                and not _is_tool_call_message(msg)
+            ):
+                transcripts.append({"role": role, "messages": [content]})
+
+    # Fallback: read from flattened conversation.transcript.{i} keys
+    if not transcripts or all(t["role"] == "user" for t in transcripts):
+        flattened = []
+        i = 0
+        while True:
+            role_key = f"conversation.transcript.{i}.message.role"
+            content_key = f"conversation.transcript.{i}.message.content"
+            role = attrs.get(role_key)
+            content = attrs.get(content_key)
+            if role is None:
+                break
+            if role in ("user", "assistant") and content:
+                flattened.append({"role": role, "messages": [content]})
+            i += 1
+        if flattened and not all(t["role"] == "user" for t in flattened):
+            transcripts = flattened
+
+    # Final fallback: read from raw_log.messages (full Vapi/Retell response)
+    if not transcripts or all(t["role"] == "user" for t in transcripts):
+        raw_log = attrs.get("raw_log", {})
+        raw_messages = raw_log.get("messages", []) if isinstance(raw_log, dict) else []
+        if raw_messages:
+            from_raw = []
+            for msg in raw_messages:
+                role = msg.get("role", "")
+                content = msg.get("message", "")
+                if (
+                    role in ("user", "assistant", "bot")
+                    and content
+                    and not _is_tool_call_message(msg)
+                ):
+                    from_raw.append(
+                        {
+                            "role": "assistant" if role == "bot" else role,
+                            "messages": [content],
+                        }
+                    )
+            if from_raw:
+                transcripts = from_raw
+
+    return transcripts
+
+
+def fetch_voice_trace_baseline_transcripts(trace_id: str, _span: dict | None = None):
+    """
+    Fetch baseline transcripts from a voice trace's provider_transcript.
+    Accepts an optional pre-fetched span to avoid redundant DB queries.
+    """
+    try:
+        span = _span or fetch_voice_conversation_span(trace_id)
+    except ValueError:
+        return []
+
+    attrs = merge_span_attrs(span)
+    return parse_voice_span_transcripts(attrs)
+
+
+def _extract_metrics_from_provider_call_data(call_execution: CallExecution):
+    """
+    Extract voice-specific metrics from a simulated CallExecution.
+    These are stored as model fields, matching the baseline span attributes.
+    """
+    # Duration from provider timestamps
+    provider_data = call_execution.provider_call_data or {}
+    vapi_data = provider_data.get("vapi", {})
+    duration = 0
+    created_at = vapi_data.get("startedAt") or vapi_data.get("createdAt")
+    ended_at = vapi_data.get("endedAt")
+    if created_at and ended_at:
+        try:
+            start = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+            duration = (end - start).total_seconds()
+        except (ValueError, TypeError):
+            pass
+
+    # Count turns from messages
+    messages = vapi_data.get("messages", [])
+    total_turns = 0
+    if isinstance(messages, list):
+        total_turns = sum(
+            1 for m in messages if m.get("role") in ("user", "assistant", "bot")
+        )
+
+    return {
+        "duration": duration,
+        "total_turns": total_turns,
+        "avg_agent_latency_ms": call_execution.avg_agent_latency_ms or 0,
+        "user_wpm": call_execution.user_wpm or 0,
+        "bot_wpm": call_execution.bot_wpm or 0,
+        "talk_ratio": call_execution.talk_ratio or 0,
+    }
+
+
+def fetch_voice_trace_comparison_metrics(
+    call_execution: CallExecution, trace_id: str, _span: dict | None = None
+):
+    """Compare a simulated call execution against a voice trace baseline."""
+    if not call_execution or not trace_id:
+        raise ValueError("Call execution and trace ID are required")
+
+    base_metrics = fetch_voice_trace_baseline_metrics(trace_id, _span=_span)
+    comparison_metrics = _extract_metrics_from_provider_call_data(call_execution)
+
+    return _build_metric_comparisons(base_metrics, comparison_metrics)
+
+
+def _extract_transcripts_from_provider_call_data(call_execution: CallExecution):
+    """
+    Extract transcripts from provider_call_data for voice call executions.
+    Voice simulations store the Vapi/Retell response in provider_call_data,
+    not in ChatMessageModel.
+    """
+    provider_data = call_execution.provider_call_data or {}
+
+    # Try Vapi format
+    vapi_data = provider_data.get("vapi", {})
+    messages = vapi_data.get("messages", [])
+
+    if messages:
+        transcripts = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("message", "")
+            if (
+                role in ("user", "assistant", "bot")
+                and content
+                and not _is_tool_call_message(msg)
+            ):
+                transcripts.append(
+                    {
+                        "role": "assistant" if role == "bot" else role,
+                        "messages": [content],
+                    }
+                )
+        return transcripts
+
+    # Try Retell format
+    retell_data = provider_data.get("retell", {})
+    transcript = retell_data.get("transcript", "") or retell_data.get(
+        "transcript_with_tool_calls", []
+    )
+
+    if isinstance(transcript, list):
+        transcripts = []
+        for entry in transcript:
+            role = entry.get("role", "")
+            content = entry.get("content", "")
+            if role in ("user", "agent", "assistant") and content:
+                transcripts.append(
+                    {
+                        "role": "assistant" if role == "agent" else role,
+                        "messages": [content],
+                    }
+                )
+        return transcripts
+
+    return []
+
+
+def fetch_voice_trace_comparison_transcripts(
+    call_execution: CallExecution, trace_id: str, _span: dict | None = None
+):
+    """Compare transcripts between a voice trace baseline and a simulated call."""
+    if not call_execution or not trace_id:
+        raise ValueError("Call execution and trace ID are required")
+
+    base_transcripts = fetch_voice_trace_baseline_transcripts(trace_id, _span=_span)
+
+    # Voice calls store transcripts in provider_call_data, not ChatMessageModel
+    comparison_transcripts = _extract_transcripts_from_provider_call_data(
+        call_execution
+    )
+    if not comparison_transcripts:
+        # Fallback to ChatMessageModel (in case it's a text-type replay)
+        comparison_transcripts = fetch_call_execution_transcripts(call_execution)
+
+    return {
+        "base_session_transcripts": base_transcripts,
+        "comparison_call_transcripts": comparison_transcripts,
+    }
+
+
+def fetch_baseline_trace_recordings(trace_id: str, _span: dict | None = None) -> dict:
+    """Fetch recording URLs from the baseline voice trace's conversation span."""
+    try:
+        span = _span or fetch_voice_conversation_span(trace_id)
+    except ValueError:
+        return {}
+
+    sa = span["span_attributes"] or {}
+    recordings = {}
+    for label, attr_key in RECORDING_ATTR_KEYS.items():
+        url = sa.get(attr_key)
+        if url:
+            recordings[label] = url
+    return recordings
+
+
+def fetch_simulated_call_recordings(call_execution: CallExecution) -> dict:
+    """Fetch recording URLs from a simulated CallExecution's provider_call_data."""
+    provider_data = call_execution.provider_call_data
+    if not provider_data or not isinstance(provider_data, dict):
+        return _fallback_model_recordings(call_execution)
+
+    # Get provider payload
+    if len(provider_data) == 1:
+        payload = next(iter(provider_data.values()))
+    else:
+        payload = provider_data.get("vapi", {})
+
+    if not isinstance(payload, dict):
+        return _fallback_model_recordings(call_execution)
+
+    recording = (
+        payload.get("artifact", {}).get("recording") or payload.get("recording") or {}
+    )
+    if not isinstance(recording, dict):
+        return _fallback_model_recordings(call_execution)
+
+    recordings = {}
+    mono = recording.get("mono") or {}
+    if combined_url := mono.get("combinedUrl"):
+        recordings["mono_combined"] = combined_url
+    if customer_url := mono.get("customerUrl"):
+        recordings["mono_customer"] = customer_url
+    if assistant_url := mono.get("assistantUrl"):
+        recordings["mono_assistant"] = assistant_url
+    if stereo_url := recording.get("stereoUrl"):
+        recordings["stereo"] = stereo_url
+
+    return recordings or _fallback_model_recordings(call_execution)
+
+
+def _fallback_model_recordings(call_execution: CallExecution) -> dict:
+    """Fallback to model-level recording URL fields."""
+    recordings = {}
+    if call_execution.stereo_recording_url:
+        recordings["stereo"] = call_execution.stereo_recording_url
+    if call_execution.recording_url:
+        recordings["mono_combined"] = call_execution.recording_url
+    return recordings
+
+
+def fetch_comparison_recordings(
+    call_execution: CallExecution, trace_id: str, _span: dict | None = None
+) -> dict:
+    """Fetch recording URLs for both baseline and simulated calls."""
+    return {
+        "baseline": fetch_baseline_trace_recordings(trace_id, _span=_span),
+        "simulated": fetch_simulated_call_recordings(call_execution),
+    }

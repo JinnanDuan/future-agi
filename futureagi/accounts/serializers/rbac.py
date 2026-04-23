@@ -1,0 +1,173 @@
+"""
+Serializers for the new RBAC endpoints.
+"""
+
+from rest_framework import serializers
+
+from tfc.constants.levels import Level
+
+
+class InviteCreateSerializer(serializers.Serializer):
+    """
+    POST /accounts/organization/invite/
+    Payload: { emails, org_level, workspace_access: [{workspace_id, level}] }
+    """
+
+    emails = serializers.ListField(
+        child=serializers.EmailField(),
+        min_length=1,
+        max_length=50,
+    )
+    org_level = serializers.ChoiceField(
+        choices=Level.CHOICES,
+        help_text="Integer org level to grant (Owner=15, Admin=8, Member=3, Viewer=1).",
+    )
+    workspace_access = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
+        help_text='List of {"workspace_id": "<uuid>", "level": <int>}.',
+    )
+
+    def validate_workspace_access(self, value):
+        sanitized = []
+        for entry in value:
+            if "workspace_id" not in entry:
+                raise serializers.ValidationError(
+                    "Each workspace_access entry must include 'workspace_id'."
+                )
+            ws_level = entry.get("level", Level.WORKSPACE_VIEWER)
+            if ws_level not in dict(Level.WORKSPACE_CHOICES):
+                raise serializers.ValidationError(
+                    f"Invalid workspace level: {ws_level}. "
+                    f"Valid: {[c[0] for c in Level.WORKSPACE_CHOICES]}"
+                )
+            # Issue 3 fix: strip to only allowed keys
+            sanitized.append(
+                {
+                    "workspace_id": entry["workspace_id"],
+                    "level": ws_level,
+                }
+            )
+        return sanitized
+
+
+class InviteResendSerializer(serializers.Serializer):
+    """POST /accounts/organization/invite/resend/"""
+
+    invite_id = serializers.UUIDField()
+    org_level = serializers.ChoiceField(
+        choices=Level.CHOICES,
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+
+
+class InviteCancelSerializer(serializers.Serializer):
+    """DELETE /accounts/organization/invite/cancel/"""
+
+    invite_id = serializers.UUIDField()
+
+
+class MemberRoleUpdateSerializer(serializers.Serializer):
+    """
+    POST /accounts/organization/members/role/
+    Payload: { user_id, org_level?, ws_level?, workspace_id }
+    """
+
+    user_id = serializers.UUIDField()
+    org_level = serializers.ChoiceField(
+        choices=Level.CHOICES,
+        required=False,
+        allow_null=True,
+    )
+    ws_level = serializers.ChoiceField(
+        choices=Level.WORKSPACE_CHOICES,
+        required=False,
+        allow_null=True,
+    )
+    workspace_id = serializers.UUIDField(
+        required=False,
+        allow_null=True,
+        help_text="Required when updating ws_level.",
+    )
+    workspace_access = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
+        help_text="List of {workspace_id, level} for explicit workspace grants on demotion.",
+    )
+
+    def validate(self, data):
+        if data.get("ws_level") and not data.get("workspace_id"):
+            raise serializers.ValidationError(
+                "workspace_id is required when updating ws_level."
+            )
+        if not data.get("org_level") and not data.get("ws_level"):
+            raise serializers.ValidationError(
+                "At least one of org_level or ws_level must be provided."
+            )
+        return data
+
+
+class MemberRemoveSerializer(serializers.Serializer):
+    """DELETE /accounts/organization/members/remove/"""
+
+    user_id = serializers.UUIDField()
+
+
+class MemberListRequestSerializer(serializers.Serializer):
+    """GET /accounts/organization/members/ query params."""
+
+    page = serializers.IntegerField(min_value=1, default=1)
+    limit = serializers.IntegerField(min_value=1, max_value=100, default=20)
+    search = serializers.CharField(required=False, allow_blank=True, default="")
+    filter_status = serializers.ListField(
+        child=serializers.ChoiceField(
+            choices=["Active", "Pending", "Expired", "Deactivated"]
+        ),
+        required=False,
+        default=list,
+    )
+    filter_role = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        default=list,
+    )
+    sort = serializers.CharField(required=False, default="-created_at")
+
+
+# ── Workspace-scoped member endpoints ──
+
+
+class WorkspaceMemberListRequestSerializer(serializers.Serializer):
+    """GET /accounts/workspace/<uuid>/members/ query params."""
+
+    page = serializers.IntegerField(min_value=1, default=1)
+    limit = serializers.IntegerField(min_value=1, max_value=100, default=20)
+    search = serializers.CharField(required=False, allow_blank=True, default="")
+    filter_status = serializers.ListField(
+        child=serializers.ChoiceField(choices=["Active", "Pending", "Expired"]),
+        required=False,
+        default=list,
+    )
+    filter_role = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        default=list,
+    )
+    sort = serializers.CharField(required=False, default="-created_at")
+
+
+class WorkspaceMemberRoleUpdateSerializer(serializers.Serializer):
+    """POST /accounts/workspace/<uuid>/members/role/"""
+
+    user_id = serializers.UUIDField()
+    ws_level = serializers.ChoiceField(choices=Level.WORKSPACE_CHOICES)
+
+
+class WorkspaceMemberRemoveSerializer(serializers.Serializer):
+    """DELETE /accounts/workspace/<uuid>/members/remove/"""
+
+    user_id = serializers.UUIDField()

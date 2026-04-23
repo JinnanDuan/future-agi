@@ -1,0 +1,238 @@
+# Test settings for Django Backend
+import os
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+
+_project_root = Path(__file__).parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+# Force EE mode during pytest runs so EE feature code (falcon_ai, etc.) is
+# registered in INSTALLED_APPS and its test modules can import models cleanly.
+# The verify-ee-*.sh scripts still exercise OSS mode explicitly via subprocess
+# env toggling; this only affects the pytest process.
+os.environ.setdefault("EE_LICENSE_KEY", "test-license-key")
+
+from .settings import *  # noqa: F403,E402
+from .settings import INSTALLED_APPS  # noqa: E402
+
+# Test mode indicator
+TESTING = True
+DEBUG = False
+
+# Test database configuration
+# Use different ports than dev (5432/9000) to avoid collisions
+# Dev: PG=5432, CH=9000 | Test: PG=15432, CH=19000
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("PG_DB", "test_tfc"),
+        "USER": os.environ.get("PG_USER", "test_user"),
+        "PASSWORD": os.environ.get("PG_PASSWORD", "test_password"),
+        "HOST": os.environ.get("PG_HOST", "localhost"),
+        "PORT": os.environ.get("PG_PORT", "15432"),
+        "TEST": {
+            "NAME": os.environ.get("PG_TEST_DB", "test_tfc_test"),
+        },
+    }
+}
+
+CLICKHOUSE = {
+    "CH_HOST": os.environ.get("CH_HOST", "localhost"),
+    "CH_PORT": os.environ.get("CH_PORT", "19000"),
+    "CH_USERNAME": os.environ.get("CH_USERNAME", "default"),
+    "CH_PASSWORD": os.environ.get("CH_PASSWORD", ""),
+    "CH_DATABASE": os.environ.get("CH_DATABASE", "test_tfc"),
+    "CH_ROUTE_TIME_SERIES": os.environ.get("CH_ROUTE_TIME_SERIES", "postgres"),
+    "CH_ROUTE_TRACE_LIST": os.environ.get("CH_ROUTE_TRACE_LIST", "postgres"),
+    "CH_ROUTE_SESSION_LIST": os.environ.get("CH_ROUTE_SESSION_LIST", "postgres"),
+    "CH_ROUTE_EVAL_METRICS": os.environ.get("CH_ROUTE_EVAL_METRICS", "postgres"),
+    "CH_ROUTE_ERROR_ANALYSIS": os.environ.get("CH_ROUTE_ERROR_ANALYSIS", "postgres"),
+    "CH_ROUTE_SPAN_LIST": os.environ.get("CH_ROUTE_SPAN_LIST", "postgres"),
+    "CH_ROUTE_TRACE_OF_SESSION_LIST": os.environ.get(
+        "CH_ROUTE_TRACE_OF_SESSION_LIST", "postgres"
+    ),
+    "CH_ROUTE_SPAN_GRAPH": os.environ.get("CH_ROUTE_SPAN_GRAPH", "postgres"),
+    "CH_ROUTE_VOICE_CALL_LIST": os.environ.get("CH_ROUTE_VOICE_CALL_LIST", "postgres"),
+    "CH_ROUTE_SESSION_ANALYTICS": os.environ.get(
+        "CH_ROUTE_SESSION_ANALYTICS", "postgres"
+    ),
+    "CH_ROUTE_ANNOTATION_GRAPH": os.environ.get(
+        "CH_ROUTE_ANNOTATION_GRAPH", "postgres"
+    ),
+    "CH_ROUTE_TRACE_DETAIL": os.environ.get("CH_ROUTE_TRACE_DETAIL", "postgres"),
+    "CH_ROUTE_MONITOR_METRICS": os.environ.get("CH_ROUTE_MONITOR_METRICS", "postgres"),
+    "CH_ROUTE_ANNOTATION_DETAIL": os.environ.get(
+        "CH_ROUTE_ANNOTATION_DETAIL", "postgres"
+    ),
+    "CH_ROUTE_VOICE_CALL_DETAIL": os.environ.get(
+        "CH_ROUTE_VOICE_CALL_DETAIL", "postgres"
+    ),
+    "CH_SHADOW_MODE": os.environ.get("CH_SHADOW_MODE", "false"),
+}
+
+# Test cache configuration
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "test-cache",
+    }
+}
+
+# Test Celery configuration
+CELERY_TASK_ALWAYS_EAGER = True
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "memory://")
+CELERY_RESULT_BACKEND = "cache+memory://"
+
+# Test file storage
+DEFAULT_FILE_STORAGE = "django.core.files.storage.InMemoryStorage"
+STATICFILES_STORAGE = "django.contrib.staticfiles.storage.StaticFilesStorage"
+
+# Test MinIO configuration
+MINIO_URL = os.environ.get("MINIO_URL", "test-minio:9000")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "test_user")
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "test_password")
+MINIO_USE_HTTPS = False
+
+
+# Disable migrations for faster tests
+class DisableMigrations:
+    def __contains__(self, item):
+        return True
+
+    def __getitem__(self, item):
+        return None
+
+
+# MIGRATION_MODULES = DisableMigrations()
+
+# Email backend for testing
+EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+
+# Password hashers for faster tests
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.MD5PasswordHasher",
+]
+
+# Logging configuration for tests
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": "WARNING",
+        },
+        "django.db.backends": {
+            "handlers": ["console"],
+            "level": "WARNING",
+        },
+    },
+}
+
+# Test-specific middleware (remove some for faster tests)
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+]
+
+# Disable some apps for faster tests
+INSTALLED_APPS = [app for app in INSTALLED_APPS if "debug_toolbar" not in app]
+
+# Test-specific settings
+SECRET_KEY = "test-secret-key-for-testing-only"
+ALLOWED_HOSTS = ["*"]
+
+# Security settings for tests
+SECURE_SSL_REDIRECT = False
+SECURE_HSTS_SECONDS = 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
+
+# Disable external services for tests
+USE_TZ = True
+TIME_ZONE = "UTC"
+
+# API settings for tests
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": ("accounts.authentication.APIKeyAuthentication",),
+    "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
+    "DEFAULT_PARSER_CLASSES": (
+        "rest_framework.parsers.JSONParser",
+        "rest_framework.parsers.MultiPartParser",
+    ),
+    "DEFAULT_PAGINATION_CLASS": "tfc.utils.pagination.ExtendedPageNumberPagination",
+    "PAGE_SIZE": 10,  # Number of objects per page.
+    "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.URLPathVersioning",
+    "EXCEPTION_HANDLER": "accounts.authentication.custom_exception_handler",
+}
+
+
+# Test media files
+MEDIA_URL = "/test-media/"
+MEDIA_ROOT = os.path.join(tempfile.gettempdir(), "test-media")
+
+# Test static files
+STATIC_URL = "/test-static/"
+STATIC_ROOT = os.path.join(tempfile.gettempdir(), "test-static")
+
+# Model serving URL for integration tests
+MODEL_SERVING_URL = os.environ.get(
+    "MODEL_SERVING_URL", "http://test-model-serving:8080"
+)
+
+# Disable analytics and tracking in tests
+MIXPANEL_TOKEN = None
+SENTRY_DSN = None
+
+# Test-specific feature flags
+FEATURE_FLAGS = {
+    "enable_new_ui": False,
+    "enable_analytics": False,
+    "enable_monitoring": False,
+}
+
+
+def ensure_clickhouse_test_database():
+    """Ensure the ClickHouse test database exists"""
+    try:
+        from clickhouse_driver import Client
+
+        # Connect to ClickHouse without specifying a database
+        client = Client(
+            host=CLICKHOUSE["CH_HOST"],
+            port=int(CLICKHOUSE["CH_PORT"] or "9000"),
+            user=CLICKHOUSE["CH_USERNAME"],
+            password=CLICKHOUSE["CH_PASSWORD"],
+        )
+
+        # Create the test database if it doesn't exist
+        database_name = CLICKHOUSE["CH_DATABASE"]
+        client.execute(f"CREATE DATABASE IF NOT EXISTS {database_name}")
+
+        print(f"✅ ClickHouse test database '{database_name}' is ready")
+
+    except Exception as e:
+        print(f"⚠️  Warning: Could not setup ClickHouse test database: {e}")
+        traceback.print_exc()
+        print("   Tests that require ClickHouse may fail")
+
+
+# Only try to create the database if we're actually testing (not during collectstatic, etc.)
+if os.environ.get("TESTING") == "true":
+    ensure_clickhouse_test_database()
+
+print("🧪 Test settings loaded successfully")

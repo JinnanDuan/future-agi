@@ -1,0 +1,83 @@
+# Environment and secrets
+.env
+.env.*
+!.env.test
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# UV cache
+.uv-cache/
+
+# Testing and coverage (generated at runtime)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage-reports/
+test-reports/
+test-logs/
+.coverage
+.coverage.*
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed in image)
+*.md
+docs/
+changelog/
+
+# Media and logs (generated at runtime)
+media/
+logs/
+*.log
+app.log
+
+# Database files
+*.sqlite3
+*.db
+
+# Docker files (not needed in image)
+docker-compose*.yml
+Dockerfile
+Dockerfile.prod
+.dockerignore
+
+# Build and test artifacts
+dist/
+build/
+*.egg-info/
+
+# Static files (collected at runtime)
+static/
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+out.out
+pre.out
+celerybeat-schedule
+
+# Large data directories
+minio_data/

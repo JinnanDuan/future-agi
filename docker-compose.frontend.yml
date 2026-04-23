@@ -1,0 +1,31 @@
+# ============================================================================
+# Frontend-only deployment
+#
+# For users running the backend elsewhere (hosted, remote VM, Future AGI
+# Cloud, a different Compose project) who just want the UI container.
+#
+# Quick start:
+#   cp .env.example .env
+#   # edit .env → set VITE_HOST_API=https://your-backend.example.com
+#   docker compose -f docker-compose.frontend.yml up
+#
+# Or pass the backend URL inline:
+#   VITE_HOST_API=https://api.example.com \
+#     docker compose -f docker-compose.frontend.yml up --build
+#
+# Open http://localhost:3000
+# ============================================================================
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the Vite bundle at build time. If you change this,
+        # rebuild with `docker compose -f docker-compose.frontend.yml build`.
+        VITE_HOST_API: ${VITE_HOST_API:-http://localhost:8000}
+        VITE_ENVIRONMENT: ${VITE_ENVIRONMENT:-production}
+    image: futureagi/frontend:local
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    restart: unless-stopped

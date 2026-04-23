@@ -1,0 +1,66 @@
+eval_id: 117
+name: customer_agent_conversation_quality
+description: Conversation-level quality metric that assesses overall user experience.
+criteria: "You are evaluating the overall quality of the customer-agent interaction.\n\n## Criteria\n\n1. Helpfulness: Does\
+  \ the agent provide useful, actionable information addressing customer needs?\n   - Score 5: Proactively offers solutions\
+  \ beyond what was asked.\n   - Score 1: Completely fails to address the customer's needs.\n\n2. Professionalism: Is the\
+  \ agent courteous, patient, and appropriately empathetic?\n   - Score 5: Consistently warm, professional, and empathetic.\n\
+  \   - Score 1: Rude, impatient, or dismissive.\n\n3. Effectiveness: Is the customer's issue resolved efficiently?\n   -\
+  \ Score 5: Issue resolved quickly with minimal back-and-forth.\n   - Score 1: Issue unresolved despite lengthy interaction.\n\
+  \n## Anti-bias Rules\n\n- A short conversation that efficiently resolves a simple issue CAN score '5'.\n- An agent that\
+  \ is very polite but cannot solve the problem should NOT score above '3'.\n- Evaluate based on agent behavior, not difficulty\
+  \ of the request.\n\n## Scoring\n\nSelect '1' for very poor: unhelpful, rude, or completely fails. Select '2' for poor:\
+  \ attempts to help but with significant gaps. Select '3' for adequate: addresses the basic issue without distinction. Select\
+  \ '4' for good: helpful, professional, resolves effectively. Select '5' for excellent: exceptionally helpful, empathetic,\
+  \ and proactive.\n\n## Inputs\n\n<conversation>{{conversation}}</conversation>"
+eval_tags:
+- Agents
+- Conversation
+visible_ui: true
+permissions:
+  allow_edit: false
+  allow_copy: true
+choices:
+- '1'
+- '2'
+- '3'
+- '4'
+- '5'
+output_type_normalized: deterministic
+config:
+  required_keys:
+  - conversation
+  output: choices
+  eval_type_id: AgentEvaluator
+  param_modalities:
+    conversation:
+    - TEXT
+    - AUDIO
+    - JSON
+    - LIST
+    - NUMBER
+    - BOOLEAN
+    - INTEGER
+    - FLOAT
+    - ARRAY
+    - DATETIME
+  config_params_desc:
+    conversation: The conversation to be evaluated
+  rule_prompt: "You are evaluating the overall quality of the customer-agent interaction.\n\n## Criteria\n\n1. Helpfulness:\
+    \ Does the agent provide useful, actionable information addressing customer needs?\n   - Score 5: Proactively offers solutions\
+    \ beyond what was asked.\n   - Score 1: Completely fails to address the customer's needs.\n\n2. Professionalism: Is the\
+    \ agent courteous, patient, and appropriately empathetic?\n   - Score 5: Consistently warm, professional, and empathetic.\n\
+    \   - Score 1: Rude, impatient, or dismissive.\n\n3. Effectiveness: Is the customer's issue resolved efficiently?\n  \
+    \ - Score 5: Issue resolved quickly with minimal back-and-forth.\n   - Score 1: Issue unresolved despite lengthy interaction.\n\
+    \n## Anti-bias Rules\n\n- A short conversation that efficiently resolves a simple issue CAN score '5'.\n- An agent that\
+    \ is very polite but cannot solve the problem should NOT score above '3'.\n- Evaluate based on agent behavior, not difficulty\
+    \ of the request.\n\n## Scoring\n\nSelect '1' for very poor: unhelpful, rude, or completely fails. Select '2' for poor:\
+    \ attempts to help but with significant gaps. Select '3' for adequate: addresses the basic issue without distinction.\
+    \ Select '4' for good: helpful, professional, resolves effectively. Select '5' for excellent: exceptionally helpful, empathetic,\
+    \ and proactive.\n\n## Inputs\n\n<conversation>{{conversation}}</conversation>"
+choice_scores:
+  '1': 0.0
+  '2': 0.25
+  '3': 0.5
+  '4': 0.75
+  '5': 1.0

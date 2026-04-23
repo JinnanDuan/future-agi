@@ -1,0 +1,24 @@
+
+
+class CustomException(Exception):
+    def __init__(
+        self, message: str | None = None, extra_info: dict | None = None
+    ):
+        self.message = message
+        self.extra_info = extra_info
+        super().__init__(self.message)
+
+    def __str__(self):
+        if self.extra_info:
+            return f"{self.message} (Extra Info: {self.extra_info})"
+        return self.message
+
+
+class NoFiApiKeyException(CustomException):
+    def __init__(self, message: str = "Please set an Fi Client API key."):
+        super().__init__(message)
+
+
+class NoOpenAiApiKeyException(CustomException):
+    def __init__(self, message: str = "Please set an Open API key."):
+        super().__init__(message)

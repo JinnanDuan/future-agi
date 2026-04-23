@@ -1,0 +1,47 @@
+eval_id: 149
+name: is_sql
+description: Validates if text appears to be syntactically valid SQL. Checks for recognized SQL keywords, balanced parentheses,
+  and balanced quotes.
+eval_tags:
+- Output Format
+- Code
+visible_ui: true
+permissions:
+  allow_edit: false
+  allow_copy: true
+output_type_normalized: pass_fail
+pass_threshold: 0.5
+config:
+  required_keys:
+  - text
+  output: Pass/Fail
+  eval_type_id: CustomCodeEval
+  config: {}
+  config_params_desc:
+    text: The text to validate as SQL
+  code: |
+    def evaluate(input, output, expected, context, **kwargs):
+        text = str(kwargs.get("text", output or "")).strip()
+        if not text:
+            return {"score": 0.0, "reason": "Empty text is not valid SQL"}
+        sql_upper = text.upper().strip().rstrip(";").strip()
+        starters = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP",
+                     "WITH", "EXPLAIN", "MERGE", "REPLACE", "TRUNCATE", "GRANT", "REVOKE",
+                     "BEGIN", "COMMIT", "ROLLBACK", "SET", "SHOW", "DESCRIBE", "USE"]
+        if not any(sql_upper.startswith(kw) for kw in starters):
+            return {"score": 0.0, "reason": "Text does not start with a recognized SQL keyword"}
+        depth = 0
+        for ch in text:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if depth < 0:
+                return {"score": 0.0, "reason": "Unbalanced parentheses (extra closing)"}
+        if depth != 0:
+            return {"score": 0.0, "reason": "Unbalanced parentheses (unclosed)"}
+        for qc in ["'", '"']:
+            count = text.count(qc) - text.count("\\" + qc)
+            if count % 2 != 0:
+                return {"score": 0.0, "reason": f"Unbalanced {qc} quotes in SQL"}
+        return {"score": 1.0, "reason": "Text appears to be valid SQL"}

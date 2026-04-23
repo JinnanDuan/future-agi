@@ -1,0 +1,69 @@
+import math
+
+import structlog
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.viewsets import ReadOnlyModelViewSet
+
+from integrations.models import SyncLog
+from integrations.serializers.sync_log import SyncLogSerializer
+from tfc.utils.base_viewset import BaseModelViewSetMixin
+from tfc.utils.general_methods import GeneralMethods
+
+logger = structlog.get_logger(__name__)
+
+
+class SyncLogViewSet(BaseModelViewSetMixin, ReadOnlyModelViewSet):
+    """Read-only viewset for sync logs."""
+
+    serializer_class = SyncLogSerializer
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    def get_queryset(self):
+        # Filter to only show sync logs for connections belonging to the user's org
+        queryset = SyncLog.objects.filter(
+            connection__organization=getattr(self.request, "organization", None)
+            or self.request.user.organization,
+            connection__deleted=False,
+        ).order_by("-started_at")
+
+        connection_id = self.request.query_params.get("connection_id")
+        if connection_id:
+            queryset = queryset.filter(connection_id=connection_id)
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        try:
+            queryset = self.get_queryset()
+            total_count = queryset.count()
+
+            page_number = max(0, int(request.query_params.get("page_number", 0)))
+            page_size = int(request.query_params.get("page_size", 20))
+            page_size = max(1, min(page_size, 100))
+
+            start = page_number * page_size
+            end = start + page_size
+
+            total_pages = math.ceil(total_count / page_size) if page_size > 0 else 0
+            next_page_number = (
+                page_number + 1 if (page_number + 1) < total_pages else None
+            )
+
+            paginated_queryset = queryset[start:end]
+            serializer = self.get_serializer(paginated_queryset, many=True)
+
+            return self._gm.success_response(
+                {
+                    "metadata": {
+                        "total_count": total_count,
+                        "current_page": page_number,
+                        "page_size": page_size,
+                        "total_pages": total_pages,
+                        "next_page": next_page_number,
+                    },
+                    "sync_logs": serializer.data,
+                }
+            )
+        except Exception as e:
+            logger.exception("Error listing sync logs", error=str(e))
+            return self._gm.internal_server_error_response("Failed to list sync logs.")

@@ -1,0 +1,516 @@
+# ============================================================================
+# Future AGI — self-hosted OSS stack
+#
+# Quick start:
+#   cp .env.example .env
+#   docker compose up
+#
+# Open http://localhost:3000 once the frontend logs "ready".
+# First boot builds the backend image (~10 min). Subsequent boots are instant.
+#
+# For hot-reload development (volume mounts, per-queue workers, exposed DB
+# ports, Temporal UI), layer the dev overlay:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# ============================================================================
+
+# PeerDB CDC shared config — used by 5 PeerDB containers
+x-peerdb-catalog: &peerdb-catalog
+  PEERDB_CATALOG_HOST: peerdb-catalog
+  PEERDB_CATALOG_PORT: 5432
+  PEERDB_CATALOG_USER: postgres
+  PEERDB_CATALOG_PASSWORD: postgres
+  PEERDB_CATALOG_DATABASE: postgres
+
+x-peerdb-flow-env: &peerdb-flow-env
+  TEMPORAL_HOST_PORT: peerdb-temporal:7233
+  PEERDB_TEMPORAL_NAMESPACE: default
+
+x-peerdb-minio-env: &peerdb-minio-env
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: _peerdb_minioadmin
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: _peerdb_minioadmin
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_REGION: us-east-1
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://peerdb-minio:9000
+  PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: peerdbbucket
+
+x-backend-env: &backend-env
+  SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-key-change-me}
+  ENV_TYPE: ${ENV_TYPE:-development}
+  DJANGO_SETTINGS_MODULE: tfc.settings.settings
+  FAST_STARTUP: ${FAST_STARTUP:-false}
+
+  # LLM gateway + code sandbox + embedding service
+  AGENTCC_INTERNAL_URL: http://gateway:8090
+  AGENTCC_INTERNAL_API_KEY: ${AGENTCC_INTERNAL_API_KEY:-}
+  RECAPTCHA_ENABLED: ${RECAPTCHA_ENABLED:-false}
+  RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY:-}
+  MAILGUN_API_KEY: ${MAILGUN_API_KEY:-}
+  MAILGUN_SENDER_DOMAIN: ${MAILGUN_SENDER_DOMAIN:-}
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-}
+  SERVER_EMAIL: ${SERVER_EMAIL:-}
+  CODE_EXECUTOR_URL: http://code-executor:8060
+  SERVING_URL: http://serving:8080
+
+  # Database — point Django's pgbouncer-aware config at postgres directly.
+  # Single-instance self-host doesn't need connection pooling; layer pgbouncer
+  # back in for multi-backend production if you want it.
+  PG_HOST: postgres
+  PG_PORT: 5432
+  PG_USER: ${PG_USER:-futureagi}
+  PG_PASSWORD: ${PG_PASSWORD:-futureagi}
+  PG_DB: ${PG_DB:-futureagi}
+  PGBOUNCER_HOST: postgres
+  PGBOUNCER_PORT: 5432
+
+  # ClickHouse
+  CH_HOST: clickhouse
+  CH_PORT: 9000
+  CH_HTTP_PORT: 8123
+  CH_USER: default
+  CH_PASSWORD: ""
+  CH_DATABASE: default
+  CH_USE_REPLICATED_ENGINES: ${CH_USE_REPLICATED_ENGINES:-false}
+
+  # Redis
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_URL: redis://redis:6379/0
+  REDIS_CACHE_URL: redis://redis:6379/1
+  REDIS_LOCK_URL: redis://redis:6379/2
+  REDIS_STATE_URL: redis://redis:6379/2
+
+  # Object storage (MinIO)
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER:-futureagi}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-futureagi}
+  S3_BUCKET: futureagi
+
+  # Temporal
+  TEMPORAL_HOST: temporal:7233
+  TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+
+  # BYOK LLM provider keys (optional)
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+
+  # Future AGI Cloud API (optional, EE-tier only)
+  FUTURE_AGI_CLOUD_API_KEY: ${FUTURE_AGI_CLOUD_API_KEY:-}
+  FUTURE_AGI_CLOUD_API_URL: ${FUTURE_AGI_CLOUD_API_URL:-https://api.futureagi.com}
+
+
+services:
+  # ==========================================================================
+  # Application
+  # ==========================================================================
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_HOST_API: ${VITE_HOST_API:-http://localhost:8000}
+        VITE_ENVIRONMENT: ${VITE_ENVIRONMENT:-development}
+        VITE_GOOGLE_SITE_KEY: ${VITE_GOOGLE_SITE_KEY:-}
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./futureagi
+      dockerfile: Dockerfile.oss
+    image: futureagi/backend:local
+    ports:
+      - "${BACKEND_PORT:-8000}:80"
+    environment:
+      <<: *backend-env
+      SERVICE_TYPE: backend
+      GRANIAN_WORKERS: ${GRANIAN_WORKERS:-1}
+      GRANIAN_THREADS: ${GRANIAN_THREADS:-2}
+      ENABLE_HTTP: ${ENABLE_HTTP:-true}
+      ENABLE_GRPC: ${ENABLE_GRPC:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./futureagi
+      dockerfile: Dockerfile.oss
+    image: futureagi/backend:local
+    environment:
+      <<: *backend-env
+      SERVICE_TYPE: temporal-worker
+      TEMPORAL_ALL_QUEUES: ${TEMPORAL_ALL_QUEUES:-true}
+      TEMPORAL_MAX_CONCURRENT_ACTIVITIES: ${TEMPORAL_MAX_CONCURRENT_ACTIVITIES:-50}
+      TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS: ${TEMPORAL_MAX_CONCURRENT_WORKFLOW_TASKS:-50}
+    depends_on:
+      temporal:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # LLM gateway (Prism / agentcc) — proxies provider APIs used by the backend.
+  # Ships with config.example.yaml as the default. Copy to
+  # futureagi/agentcc-gateway/config.yaml and edit to enable more providers.
+  # --------------------------------------------------------------------------
+
+  gateway:
+    build:
+      context: ./futureagi/agentcc-gateway
+    ports:
+      - "${GATEWAY_PORT:-8090}:8080"
+    environment:
+      AGENTCC_INTERNAL_API_KEY: ${AGENTCC_INTERNAL_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GOOGLE_API_KEY:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    volumes:
+      # Default to the shipped example config. Override by creating
+      # `futureagi/agentcc-gateway/config.yaml`.
+      - ./futureagi/agentcc-gateway/config.example.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Embedding / model-serving service
+  # --------------------------------------------------------------------------
+
+  serving:
+    build:
+      context: ./futureagi/model_serving
+      dockerfile: Dockerfile.oss
+    ports:
+      - "${SERVING_PORT:-8080}:8080"
+    environment:
+      <<: *backend-env
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Sandboxed code executor for eval code. Requires `privileged: true` for
+  # nsjail namespace creation — won't run on Fargate / managed container
+  # platforms that disallow privileged containers.
+  # --------------------------------------------------------------------------
+
+  code-executor:
+    build:
+      context: ./futureagi/code-executor
+    ports:
+      - "${CODE_EXECUTOR_PORT:-8060}:8060"
+    privileged: true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2"
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Data stores — bound to 127.0.0.1 so only the host can reach them.
+  # Put a reverse proxy in front of `frontend` to expose publicly.
+  # ==========================================================================
+
+  postgres:
+    image: postgres:16
+    # wal_level=logical + slots enable PeerDB CDC replication.
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_wal_senders=25
+      -c max_replication_slots=25
+    environment:
+      POSTGRES_USER: ${PG_USER:-futureagi}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-futureagi}
+      POSTGRES_DB: ${PG_DB:-futureagi}
+    ports:
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-futureagi} -d ${PG_DB:-futureagi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.10.2.80
+    ports:
+      - "127.0.0.1:${CH_HTTP_PORT:-8123}:8123"
+      - "127.0.0.1:${CH_PORT:-9000}:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-07T23-21-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-futureagi}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-futureagi}
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9005}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9006}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Temporal — durable workflow engine. Shares the main Postgres.
+  # ==========================================================================
+
+  temporal:
+    image: temporalio/auto-setup:1.29.1
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${PG_USER:-futureagi}
+      POSTGRES_PWD: ${PG_PASSWORD:-futureagi}
+      POSTGRES_SEEDS: postgres
+      DBNAME: ${PG_DB:-futureagi}
+      ENABLE_ES: "false"
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:${TEMPORAL_PORT:-7233}:7233"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x temporal-server"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ==========================================================================
+  # PeerDB — Postgres → ClickHouse change-data-capture. Syncs transactional
+  # data to the analytics store so Observe/Trace views work.
+  #
+  # After first `docker compose up`, register mirrors:
+  #   docker compose exec peerdb-init bash /setup.sh
+  # PeerDB UI → http://localhost:3001 (creds: peerdb / peerdb)
+  # ==========================================================================
+
+  peerdb-catalog:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - peerdb-catalog-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  peerdb-temporal:
+    image: temporalio/auto-setup:1.29
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PWD: postgres
+      POSTGRES_SEEDS: peerdb-catalog
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    volumes:
+      - ./futureagi/config/peerdb/temporal-dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/development-sql.yaml
+    depends_on:
+      peerdb-catalog:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x temporal-server"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  peerdb-minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: _peerdb_minioadmin
+      MINIO_ROOT_PASSWORD: _peerdb_minioadmin
+    volumes:
+      - peerdb-minio-data:/data
+    entrypoint: >
+      /bin/sh -c "
+      minio server /data --console-address=:36987 &
+      sleep 2;
+      mc alias set myminiopeerdb http://localhost:9000 _peerdb_minioadmin _peerdb_minioadmin;
+      mc mb --ignore-existing myminiopeerdb/peerdbbucket;
+      wait
+      "
+    restart: unless-stopped
+
+  peerdb-flow-api:
+    image: ghcr.io/peerdb-io/flow-api:stable-v0.36.9
+    environment:
+      <<: [*peerdb-catalog, *peerdb-flow-env, *peerdb-minio-env]
+      PEERDB_ALLOWED_TARGETS:
+    depends_on:
+      peerdb-temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  peerdb-flow-worker:
+    image: ghcr.io/peerdb-io/flow-worker:stable-v0.36.9
+    environment:
+      <<: [*peerdb-catalog, *peerdb-flow-env, *peerdb-minio-env]
+    depends_on:
+      peerdb-temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  peerdb-flow-snapshot-worker:
+    image: ghcr.io/peerdb-io/flow-snapshot-worker:stable-v0.36.9
+    environment:
+      <<: [*peerdb-catalog, *peerdb-flow-env, *peerdb-minio-env]
+    depends_on:
+      peerdb-temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  peerdb-server:
+    image: ghcr.io/peerdb-io/peerdb-server:stable-v0.36.9
+    stop_signal: SIGINT
+    environment:
+      <<: *peerdb-catalog
+      PEERDB_PASSWORD: peerdb
+      PEERDB_FLOW_SERVER_ADDRESS: grpc://peerdb-flow-api:8112
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:${PEERDB_PORT:-9900}:9900"
+    depends_on:
+      peerdb-catalog:
+        condition: service_healthy
+    restart: unless-stopped
+
+  peerdb-ui:
+    image: ghcr.io/peerdb-io/peerdb-ui:stable-v0.36.9
+    environment:
+      <<: *peerdb-catalog
+      PEERDB_FLOW_SERVER_HTTP: http://peerdb-flow-api:8113
+      NEXTAUTH_SECRET: peerdb-local-dev
+      NEXTAUTH_URL: http://localhost:${PEERDB_UI_PORT:-3001}
+      PEERDB_ALLOWED_TARGETS:
+      PEERDB_CLICKHOUSE_ALLOWED_DOMAINS:
+    ports:
+      - "${PEERDB_UI_PORT:-3001}:3000"
+    depends_on:
+      - peerdb-flow-api
+    restart: unless-stopped
+
+  peerdb-temporal-init:
+    image: temporalio/admin-tools
+    restart: "no"
+    environment:
+      TEMPORAL_CLI_ADDRESS: peerdb-temporal:7233
+    depends_on:
+      peerdb-temporal:
+        condition: service_healthy
+    # Modern temporalio/admin-tools ships `temporal` CLI; `tctl` was removed.
+    # `|| true` keeps this idempotent across reboots (second run reports
+    # "already exists" and exits non-zero).
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Registering MirrorName search attribute...' &&
+      temporal operator search-attribute create --name MirrorName --type Text --namespace default --address peerdb-temporal:7233 || true;
+      echo 'Done'
+      "
+
+  peerdb-init:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      SRC_PG_HOST: postgres
+      SRC_PG_PORT: 5432
+      SRC_PG_USER: ${PG_USER:-futureagi}
+      SRC_PG_PASSWORD: ${PG_PASSWORD:-futureagi}
+      SRC_PG_DB: ${PG_DB:-futureagi}
+      DST_CH_HOST: clickhouse
+      DST_CH_PORT: 9000
+      DST_CH_USER: default
+      DST_CH_PASSWORD: ""
+      DST_CH_DB: default
+      PEERDB_HOST: peerdb-server
+      PEERDB_PORT: 9900
+    volumes:
+      - ./futureagi/scripts/peerdb-setup-mirrors.sh:/setup.sh:ro
+    entrypoint: ["bash", "/setup.sh"]
+    depends_on:
+      peerdb-temporal-init:
+        condition: service_completed_successfully
+      peerdb-server:
+        condition: service_started
+      peerdb-flow-api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  redis-data:
+  minio-data:
+  peerdb-catalog-data:
+  peerdb-minio-data:
+
+
+networks:
+  default:
+    name: futureagi

@@ -1,0 +1,503 @@
+# views.py
+import re
+import traceback
+
+import structlog
+from django.db.models import F
+from django.db.models.functions import Lower
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+logger = structlog.get_logger(__name__)
+from accounts.utils import get_request_organization
+from model_hub.models.api_key import ApiKey
+from model_hub.models.custom_models import CustomAIModel
+from model_hub.models.metric import Metric
+from model_hub.serializers.custom_models import (
+    CustomAIModelSerializer,
+    CustomAIModelsListSerializer,
+)
+from model_hub.utils.azure_endpoints import normalize_azure_custom_model_config
+from model_hub.utils.clickhouse import get_model_volume
+from model_hub.utils.utils import validate_model_working
+from tfc.utils.error_codes import get_error_message
+from tfc.utils.general_methods import GeneralMethods
+from tfc.utils.pagination import ExtendedPageNumberPagination
+
+
+class CustomAIModelView(APIView):
+    """Return all the models that belongs to a user organization"""
+
+    serializer_class = CustomAIModelSerializer
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    def get(self, request, *args, **kwargs):
+        # Get the organization of the logged-in user
+        user_organization = get_request_organization(self.request)
+
+        sort_order = request.query_params.get("sort_order")
+        search_query = request.query_params.get("search_query")
+
+        # Return all UserAIModels that belong to the user's organization
+        ai_models = CustomAIModel.objects.filter(
+            organization=user_organization,
+        ).order_by("-created_at")
+
+        if sort_order:
+            if sort_order == "asc":
+                ai_models = ai_models.order_by(Lower("user_model_id"))
+            elif sort_order == "desc":
+                ai_models = ai_models.order_by(Lower(F("user_model_id")).desc())
+
+        if search_query:
+            pattern = rf"(?i){re.escape(search_query)}"
+            ai_models = ai_models.filter(user_model_id__regex=pattern)
+
+        paginator = ExtendedPageNumberPagination()
+        result_page = paginator.paginate_queryset(ai_models, request)
+        result_page = CustomAIModelSerializer(result_page, many=True).data
+
+        api_keys_all = ApiKey.objects.filter(
+            provider__in=[res.get("provider") for res in result_page],
+            organization=user_organization,
+        )
+        provider_key_map = {res.provider: res for res in api_keys_all}
+        for res in result_page:
+            res["volume"], res["total_count"] = get_model_volume(model_ids=[res["id"]])
+            if not res.get("config_json"):
+                try:
+                    api_key = provider_key_map.get(res.get("provider"))
+
+                    if api_key:
+                        keys = api_key.masked_actual_key
+                        res.update(
+                            {
+                                "config_json": (
+                                    {"key": keys} if isinstance(keys, str) else keys
+                                )
+                            }
+                        )
+                except Exception as e:
+                    # Log the error but don't break the response
+                    logger.warning(
+                        f"Error fetching API keys for model {res.get('id')}: {e}"
+                    )
+
+            if res["provider"].startswith("custom_"):
+                res["provider"] = "custom"
+
+        return paginator.get_paginated_response(list(result_page))
+
+
+class CustomAIModelCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    def post(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            model_provider = data.get("model_provider")
+            model_name = data.get("model_name")
+            input_token_cost = data.get("input_token_cost")
+            output_token_cost = data.get("output_token_cost")
+            config_json = data.get("config_json", {})
+            key = data.get("key", None)
+            user_organization = get_request_organization(self.request)
+
+            if not model_provider:
+                return self._gm.bad_request("Model Provider Required!")
+
+            if (
+                str(model_provider).strip().lower() == "bedrock"
+                or str(model_provider).strip().lower() == "sagemaker"
+            ):
+                if (
+                    not all(
+                        key in config_json
+                        for key in [
+                            "aws_access_key_id",
+                            "aws_secret_access_key",
+                            "aws_region_name",
+                        ]
+                    )
+                ) and (not key):
+                    return self._gm.bad_request(get_error_message("MISSING_AWS_KEY"))
+                if not key:
+                    api_key_params = {
+                        "aws_access_key_id": config_json["aws_access_key_id"],
+                        "aws_secret_access_key": config_json["aws_secret_access_key"],
+                        "aws_region_name": config_json["aws_region_name"],
+                    }
+                else:
+                    api_key_params = {"key": key}
+
+            elif str(model_provider).strip().lower() == "azure":
+                normalized = normalize_azure_custom_model_config(config_json)
+                required_keys = ["api_base", "api_key"]
+                if normalized.get("azure_endpoint_type") != "foundry":
+                    required_keys.append("api_version")
+                if (
+                    not all(
+                        normalized.get(required_key) for required_key in required_keys
+                    )
+                ) and (not key):
+                    return self._gm.bad_request(get_error_message("MISSING_AZURE_KEY"))
+                if not key:
+                    api_key_params = {
+                        "api_base": normalized["api_base"],
+                        "api_key": normalized["api_key"],
+                    }
+                    if normalized.get("api_version"):
+                        api_key_params["api_version"] = normalized["api_version"]
+                    # Update config_json with normalized values and endpoint type
+                    config_json = {
+                        **config_json,
+                        "api_base": normalized["api_base"],
+                        "api_key": normalized["api_key"],
+                        "azure_endpoint_type": normalized["azure_endpoint_type"],
+                    }
+                    if normalized.get("api_version"):
+                        config_json["api_version"] = normalized["api_version"]
+                else:
+                    api_key_params = {"key": key}
+
+            elif (str(model_provider).strip().lower() == "vertex_ai") or (
+                str(model_provider).strip().lower() == "custom"
+            ):
+                if model_provider == "vertex_ai" and not model_name.startswith(
+                    "vertex_ai/"
+                ):
+                    model_name = f"vertex_ai/{model_name}"
+                if (not config_json) and (not key):
+                    return self._gm.bad_request(get_error_message("MISSING_JSON_KEY"))
+                if not key:
+                    api_key_params = {
+                        "config_json": config_json,
+                    }
+                else:
+                    api_key_params = {"key": key}
+
+            elif str(model_provider).strip().lower() == "openai":
+                if not config_json:
+                    return self._gm.bad_request(get_error_message("MISSING_OPENAI_KEY"))
+                api_key_params = {"api_key": config_json["key"]}
+                if config_json.get("api_base"):
+                    api_key_params.update({"api_base": config_json["api_base"]})
+
+            config_copy = config_json.copy()
+            res = validate_model_working(
+                model_name=model_name, api_key=api_key_params, provider=model_provider
+            )
+            if isinstance(res, Exception):
+                return self._gm.bad_request(str(res))
+
+            if CustomAIModel.objects.filter(
+                user_model_id=model_name,
+                organization=user_organization,
+                provider=str(model_provider).strip().lower(),
+            ).exists():
+                return self._gm.bad_request(
+                    get_error_message("MODEL_NAME_ALREADY_EXISTS")
+                )
+
+            model = CustomAIModel.objects.create(
+                user_model_id=model_name,
+                provider=str(model_provider).strip().lower(),
+                input_token_cost=input_token_cost,
+                output_token_cost=output_token_cost,
+                organization=user_organization,
+                key_config=config_copy,
+                user=request.user,
+                deleted=False,
+            )
+
+            return self._gm.success_response(
+                {
+                    "status": "success",
+                    "message": f"{model_name} Model created successfully",
+                    "data": {"id": model.id},
+                }
+            )
+        except Exception as e:
+            logger.exception(f"Erro in CustomAIModelCreateView: {e}")
+            return self._gm.bad_request(get_error_message("UNABLE_TO_CREATE_MODEL"))
+
+
+class CustomAIModelDetailsView(APIView):
+    serializer_class = CustomAIModelSerializer
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    def get(self, request, id, *args, **kwargs):
+        """Return details regarding a particular model, given his id"""
+        user_organization = get_request_organization(self.request)
+        ai_model = CustomAIModel.objects.filter(
+            organization=user_organization, id=id
+        ).first()
+        if not ai_model:
+            return Response(
+                {"status": "error", "message": "Custom AI model not found"}, status=404
+            )
+        ai_model_serializer = CustomAIModelSerializer(ai_model)
+        # meta_properties = get_model_details(ai_model, user_organization)
+        return Response({**ai_model_serializer.data})
+
+    def post(self, request, id, *args, **kwargs):
+        """Update custom model details"""
+        user_organization = get_request_organization(self.request)
+        data = request.data
+        input_token_cost = data.get("input_token_cost")
+        output_token_cost = data.get("output_token_cost")
+        try:
+            ai_model = CustomAIModel.objects.filter(
+                organization=user_organization, id=id
+            ).first()
+            if not ai_model:
+                return Response(
+                    {"status": "error", "message": "Custom AI model not found"},
+                    status=404,
+                )
+            new_model_name = data.get("model_name")
+            if (
+                new_model_name
+                and CustomAIModel.objects.filter(
+                    user_model_id=new_model_name,
+                    organization=user_organization,
+                )
+                .exclude(id=id)
+                .exists()
+            ):
+                return self._gm.bad_request(get_error_message("MODEL_NAME_IS_USED"))
+            if input_token_cost is not None:
+                ai_model.input_token_cost = input_token_cost
+            if output_token_cost is not None:
+                ai_model.output_token_cost = output_token_cost
+            if new_model_name:
+                ai_model.user_model_id = new_model_name
+            ai_model.save()
+
+            ai_model_serializer = CustomAIModelSerializer(ai_model)
+
+            return Response({**ai_model_serializer.data}, status=200)
+
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
+
+
+class UpdateMetricCustomAIModelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, id, *args, **kwargs):
+        """Update default metric of the model given model id in request and information of metric in the body"""
+        user_organization = get_request_organization(self.request)
+
+        data = request.data
+        ai_model_id = id
+        new_metrics_id = data.get("metric_id")
+
+        try:
+            ai_model = CustomAIModel.objects.get(
+                id=ai_model_id, organization=user_organization
+            )
+            new_metrics = Metric.objects.get(id=new_metrics_id, model_id=ai_model_id)
+            ai_model.default_metric = new_metrics
+            ai_model.save()
+
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Custom AI model updated successfully",
+                }
+            )
+
+        except CustomAIModel.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Custom AI model not found"}, status=404
+            )
+
+
+class UpdateBaselineDatasetCustomAIModelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, id, *args, **kwargs):
+        user_organization = get_request_organization(self.request)
+
+        data = request.data
+        ai_model_id = id
+        environment = data.get("environment")
+        version = data.get("model_version")
+
+        try:
+            ai_model = CustomAIModel.objects.get(
+                id=ai_model_id, organization=user_organization
+            )
+            ai_model.baseline_model_environment = environment
+            ai_model.baseline_model_version = version
+            ai_model.save()
+
+            return Response(
+                {
+                    "status": "success",
+                    "message": "AI model updated successfully",
+                }
+            )
+
+        except CustomAIModel.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "AI model not found"}, status=404
+            )
+
+
+class CustomAIModelListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        user_organization = get_request_organization(self.request)
+        search_query = request.query_params.get("search_query")
+        limit = request.query_params.get("limit")
+
+        ai_models = (
+            CustomAIModel.objects.filter(organization=user_organization)
+            .values("id", "user_model_id")
+            .order_by("-created_at")
+        )
+
+        if search_query:
+            pattern = rf"(?i){re.escape(search_query)}"
+            ai_models = ai_models.filter(user_model_id__regex=pattern)
+
+        paginator = ExtendedPageNumberPagination()
+        paginator.page_size = int(limit) if limit else 10
+        result_page = paginator.paginate_queryset(ai_models, request)
+        result_page = CustomAIModelsListSerializer(result_page, many=True).data
+
+        return paginator.get_paginated_response(list(result_page))
+
+
+class DeleteCustomAIModelView(APIView):
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    def delete(self, request, *args, **kwargs):
+        ai_model_ids = request.data.get("ids", [])
+        user_organization = get_request_organization(request)
+        try:
+            for model_id in ai_model_ids:
+                # SECURITY: Only delete models belonging to user's organization
+                CustomAIModel.objects.filter(
+                    id=model_id,
+                    organization=user_organization,
+                ).update(deleted=True, user_model_id=self._gm.generate_random_text())
+
+            return self._gm.success_response("AI model deleted successfully")
+
+        except CustomAIModel.DoesNotExist:
+            return self._gm.bad_request("AI model not found")
+        except Exception as e:
+            return self._gm.bad_request(str(e))
+
+
+class EditCustomModel(APIView):
+    permission_classes = [IsAuthenticated]
+    _gm = GeneralMethods()
+
+    def get(self, request, *args, **kwargs):
+        model_id = request.query_params.get("id", None)
+
+        if not model_id:
+            return self._gm.bad_request("Model ID is required.")
+        try:
+            model = CustomAIModel.objects.get(
+                id=model_id, organization=get_request_organization(request)
+            )
+            data = {
+                "model_name": model.user_model_id,
+                "input_token_cost": model.input_token_cost,
+                "output_token_cost": model.output_token_cost,
+                "model_provider": (
+                    model.provider
+                    if not model.provider.startswith("custom_")
+                    else "custom"
+                ),
+            }
+            # Try to get API key if it exists (may not exist for all models)
+            api_keys = ApiKey.objects.filter(
+                provider=model.provider, organization=get_request_organization(request)
+            ).first()
+            if api_keys:
+                keys = api_keys.masked_actual_key
+                data.update({"key" if api_keys.actual_key else "config_json": keys})
+            return self._gm.success_response(data)
+
+        except CustomAIModel.DoesNotExist:
+            return self._gm.bad_request("Model not found")
+        except Exception as e:
+            traceback.print_exc()
+            return self._gm.bad_request(str(e))
+
+    def patch(self, request, *args, **kwargs):
+        model_id = request.data.get("id", None)
+
+        if not model_id:
+            return self._gm.bad_request("Model ID is required")
+
+        try:
+            data = request.data
+            model_name = data.get("model_name", None)
+            input_token_cost = data.get("input_token_cost", None)
+            output_token_cost = data.get("output_token_cost", None)
+            config_json = data.get("config_json", {})
+            key = data.get("key", None)
+
+            model = CustomAIModel.objects.get(
+                id=model_id, organization=get_request_organization(request)
+            )
+            if not model_name:
+                model_name = model.user_model_id
+            try:
+                if key:
+                    res = validate_model_working(
+                        model_name=model_name,
+                        api_key={"api_key": key},
+                        provider=model.provider,
+                    )
+                elif config_json:
+                    res = validate_model_working(
+                        model_name=model_name,
+                        api_key=(
+                            {"config_json": config_json}
+                            if model.provider in ["vertex_ai", "custom"]
+                            else config_json
+                        ),
+                        provider=model.provider,
+                    )
+
+                if isinstance(res, Exception):
+                    return self._gm.bad_request(
+                        "Model_validation Failed. Please enter correct details."
+                    )
+            except Exception:
+                return self._gm.bad_request("Model Validation failed.")
+
+            model.user_model_id = model_name if model_name else model.user_model_id
+            model.input_token_cost = (
+                input_token_cost if input_token_cost else model.input_token_cost
+            )
+            model.output_token_cost = (
+                output_token_cost if output_token_cost else output_token_cost
+            )
+            model.key_config = (
+                config_json
+                if config_json
+                else {"key": key} if key else model.key_config
+            )
+            model.save()
+
+            return self._gm.success_response("Model updated Successfully")
+
+        except CustomAIModel.DoesNotExist:
+            return self._gm.bad_request("AI model not found")
+        except Exception as e:
+            return self._gm.bad_request(str(e))
