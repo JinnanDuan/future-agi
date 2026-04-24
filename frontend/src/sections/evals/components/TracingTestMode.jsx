@@ -679,7 +679,7 @@ const TracingTestMode = React.forwardRef(
     }, [spanDetail]);
 
     const fieldNames = useMemo(
-      () => walkedFromDetail || rowFields.map((f) => f.key),
+      () => walkedFromDetail || rowFields.map((f) => f?.colId || f?.key),
       [walkedFromDetail, rowFields],
     );
 
