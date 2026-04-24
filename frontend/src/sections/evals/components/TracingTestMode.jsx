@@ -699,7 +699,6 @@ const TracingTestMode = React.forwardRef(
     useEffect(() => {
       if (!fieldNames.length || !variables.length) return;
       const fieldSet = new Set(fieldNames);
-      console.log({fieldSet})
       setMapping((prev) => {
         const next = { ...prev };
         let changed = false;
@@ -840,7 +839,6 @@ const TracingTestMode = React.forwardRef(
         const evalMapping = {};
         for (const variable of variables) {
           const mappedField = mapping[variable];
-          console.log({flatValueMap})
           if (!mappedField) continue;
 
           // 1. Try the flat value map (same resolution as the dropdown)
