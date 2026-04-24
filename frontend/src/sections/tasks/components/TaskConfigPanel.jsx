@@ -468,7 +468,6 @@ const TaskConfigPanel = ({
       customEvalConfigId: stored.customEvalConfigId || stored.id,
     };
   }, [editingIndex, configuredEvals]);
-console.log("Editing eval:", editingEval);
   const resolvedProjectName =
     initialProjectName ||
     projectsList?.find((p) => p.id === project)?.name ||
