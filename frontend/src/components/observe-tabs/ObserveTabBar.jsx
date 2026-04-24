@@ -23,6 +23,7 @@ import {
   useReorderSavedViews,
 } from "src/api/project/saved-views";
 import { useTabStoreShallow } from "src/sections/projects/LLMTracing/tabStore";
+import { useObserveHeader } from "src/sections/project/context/ObserveHeaderContext";
 
 import FixedTab from "./FixedTab";
 import CustomViewTab from "./CustomViewTab";
@@ -121,16 +122,18 @@ const ObserveTabBar = ({
   const [saveViewAnchor, setSaveViewAnchor] = useState(null);
   const [isSavingView, setIsSavingView] = useState(false);
   const { mutate: createSavedView } = useCreateSavedView(projectId);
+  const { getViewConfig } = useObserveHeader();
 
   const handleSaveViewConfirm = useCallback(
     (name) => {
       setIsSavingView(true);
+      const snapshot = getViewConfig?.() ?? null;
       createSavedView(
         {
           project_id: projectId,
           name,
           tab_type: "traces",
-          config: {},
+          config: snapshot ?? {},
         },
         {
           onSuccess: (res) => {
@@ -147,7 +150,7 @@ const ObserveTabBar = ({
         },
       );
     },
-    [projectId, createSavedView, onTabChange],
+    [projectId, createSavedView, onTabChange, getViewConfig],
   );
 
   // DnD sensors — require 5px of movement before starting drag

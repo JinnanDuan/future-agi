@@ -13,10 +13,13 @@ export const ObserveHeaderContext = createContext({
     toolbarElement: null,
   },
   setHeaderConfig: () => {},
-  // Active saved-view config (filters, columns, sort, display) — set when a
-  // custom view tab is selected, null for default fixed tabs.
   activeViewConfig: null,
   setActiveViewConfig: () => {},
+  // Callback registered by LLMTracingView so save-view UIs (ObserveTabBar,
+  // ViewConfigModal) can snapshot current filters/display at save time.
+  // Pass null to unregister.
+  registerGetViewConfig: () => {},
+  getViewConfig: () => null,
 });
 
 export const useObserveHeader = () => {

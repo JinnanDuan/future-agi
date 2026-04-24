@@ -844,7 +844,8 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
   const compareCallLogsGridRef = useRef(null);
   const columnConfigureRef = useRef();
 
-  const { setHeaderConfig, activeViewConfig } = useObserveHeader();
+  const { setHeaderConfig, activeViewConfig, registerGetViewConfig } =
+    useObserveHeader();
 
   const { data: projectDetail } = useGetProjectDetails(observeId, !isUserMode);
   // In user mode the grid should behave like an OBSERVE project (no project
@@ -1590,6 +1591,10 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
   useEffect(() => {
     if (!activeViewConfig) return;
 
+    if (import.meta.env.MODE !== "production") {
+      // eslint-disable-next-line no-console
+    }
+
     // Apply display settings
     const display = activeViewConfig.display || {};
     if (display.viewMode) setViewMode(display.viewMode);
@@ -1606,48 +1611,53 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
       pendingCustomColumnsRef.current = display.customColumns;
     }
 
-    // Apply filters
-    if (activeViewConfig.filters?.length > 0) {
-      const filtersWithIds = activeViewConfig.filters.map((f) => ({
-        ...f,
-        id: f.id || getRandomId(),
-      }));
+    // Primary date filter — stored inside display for backend-whitelist compatibility.
+    // Only apply if the saved view has one; old views without it keep the current date.
+    if (display.dateFilter) {
+      if (import.meta.env.MODE !== "production") {
+        // eslint-disable-next-line no-console
+      }
       if (selectedTab === "trace") {
-        setPrimaryTraceFilters(filtersWithIds);
+        setPrimaryTraceDateFilter(display.dateFilter);
       } else {
-        setPrimarySpanFilters(filtersWithIds);
+        setPrimarySpanDateFilter(display.dateFilter);
       }
     }
 
-    // Restore compare state
-    if (display.showCompare) {
-      if (activeViewConfig.compareFilters?.length > 0) {
-        const compareFiltersWithIds = activeViewConfig.compareFilters.map(
-          (f) => ({
-            ...f,
-            id: f.id || getRandomId(),
-          }),
-        );
-        if (selectedTab === "trace") {
-          setCompareTraceFilters(compareFiltersWithIds);
-        } else {
-          setCompareSpansFilters(compareFiltersWithIds);
-        }
+    // Apply filters — replace unconditionally so switching views clears stale filters.
+    const nextFilters = (activeViewConfig.filters || []).map((f) => ({
+      ...f,
+      id: f.id || getRandomId(),
+    }));
+    if (selectedTab === "trace") {
+      setPrimaryTraceFilters(nextFilters);
+    } else {
+      setPrimarySpanFilters(nextFilters);
+    }
+
+    // Apply extraFilters unconditionally (independent of compare mode).
+    setExtraFilters(activeViewConfig.extraFilters || []);
+
+    // Compare state — always replace, regardless of current showCompare state.
+    const nextCompareFilters = (activeViewConfig.compareFilters || []).map(
+      (f) => ({
+        ...f,
+        id: f.id || getRandomId(),
+      }),
+    );
+    if (selectedTab === "trace") {
+      setCompareTraceFilters(nextCompareFilters);
+      if (activeViewConfig.compareDateFilter !== undefined) {
+        setCompareTraceDateFilter(activeViewConfig.compareDateFilter);
       }
-      if (activeViewConfig.compareDateFilter) {
-        if (selectedTab === "trace") {
-          setCompareTraceDateFilter(activeViewConfig.compareDateFilter);
-        } else {
-          setCompareSpansDateFilter(activeViewConfig.compareDateFilter);
-        }
-      }
-      if (activeViewConfig.extraFilters?.length > 0) {
-        setExtraFilters(activeViewConfig.extraFilters);
-      }
-      if (activeViewConfig.compareExtraFilters?.length > 0) {
-        setCompareExtraFilters(activeViewConfig.compareExtraFilters);
+    } else {
+      setCompareSpansFilters(nextCompareFilters);
+      if (activeViewConfig.compareDateFilter !== undefined) {
+        setCompareSpansDateFilter(activeViewConfig.compareDateFilter);
       }
     }
+    setCompareExtraFilters(activeViewConfig.compareExtraFilters || []);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeViewConfig]);
 
@@ -1765,6 +1775,11 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
       showCompare,
       hasEvalFilter,
       customColumns: getCustomColumns(),
+      // Stash primary date filter inside display for backend-whitelist compatibility
+      dateFilter:
+        selectedTab === "trace"
+          ? primaryTraceDateFilter
+          : primarySpanDateFilter,
     };
     const mapFilters = (filters) =>
       (filters || []).map((f) => ({
@@ -1776,6 +1791,8 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
       filters: mapFilters(
         selectedTab === "trace" ? primaryTraceFilters : primarySpanFilters,
       ),
+      // extraFilters is independent of compare mode — always persist
+      extraFilters: extraFilters || [],
     };
     // Include compare state when compare mode is on
     if (showCompare) {
@@ -1786,7 +1803,6 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
         selectedTab === "trace"
           ? compareTraceDateFilter
           : compareSpansDateFilter;
-      config.extraFilters = extraFilters || [];
       config.compareExtraFilters = compareExtraFilters || [];
     }
     return config;
@@ -1801,6 +1817,8 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
     selectedTab,
     primaryTraceFilters,
     primarySpanFilters,
+    primaryTraceDateFilter,
+    primarySpanDateFilter,
     compareTraceFilters,
     compareSpansFilters,
     compareTraceDateFilter,
@@ -1808,6 +1826,11 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
     extraFilters,
     compareExtraFilters,
   ]);
+
+  useEffect(() => {
+    registerGetViewConfig(buildViewConfig);
+    return () => registerGetViewConfig(null);
+  }, [registerGetViewConfig, buildViewConfig]);
 
   // Auto-save display settings when they change
   const autoSaveTimerRef = useRef(null);
@@ -1943,10 +1966,43 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
     createSavedView,
   ]);
 
+  // Eval filter chips — drives the Filter button's red "active" dot.
+  // Keep this scoped to extraFilters only; date/column changes should NOT
+  // light up the Filter button (those have their own affordances).
   const hasActiveFilter = useMemo(
     () => extraFilters?.length > 0,
     [extraFilters],
   );
+
+  // Whether there's any non-default filter state worth saving. Drives the
+  // "Save view" button visibility. Broader than hasActiveFilter because
+  // date changes and column filters are also savable state.
+  const canSaveView = useMemo(() => {
+    if (extraFilters?.length > 0) return true;
+
+    const currentDate =
+      selectedTab === "trace" ? primaryTraceDateFilter : primarySpanDateFilter;
+    if (
+      currentDate?.dateOption &&
+      currentDate.dateOption !== defaultDateFilter?.dateOption
+    ) {
+      return true;
+    }
+
+    const columnFilters =
+      selectedTab === "trace" ? primaryTraceFilters : primarySpanFilters;
+    if (columnFilters?.some((f) => f?.columnId)) return true;
+
+    return false;
+  }, [
+    extraFilters,
+    selectedTab,
+    primaryTraceDateFilter,
+    primarySpanDateFilter,
+    primaryTraceFilters,
+    primarySpanFilters,
+    defaultDateFilter,
+  ]);
 
   const currentGridRef = useMemo(() => {
     if (selectedGraph === "primary" && selectedTab === "trace") {
@@ -2812,6 +2868,7 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
                   : setPrimarySpanDateFilter
               }
               hasActiveFilter={hasActiveFilter}
+              canSaveView={canSaveView}
               onFilterToggle={() => {
                 // Clear any chip/+ anchor so the popover re-anchors to the
                 // toolbar Filter button (avoids opening on a stale anchor).

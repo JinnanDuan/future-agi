@@ -15,7 +15,11 @@ import {
 import ObserveTabs from "./ObserveTabs";
 import { useTabStoreShallow } from "./LLMTracing/tabStore";
 import { useGetProjectDetails } from "src/api/project/project-detail";
-import { useGetSavedViews } from "src/api/project/saved-views";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  useGetSavedViews,
+  SAVED_VIEWS_KEY,
+} from "src/api/project/saved-views";
 import ReplayDrawer from "./ReplayDrawer/ReplayDrawer";
 import {
   resetReplaySessionsStore,
@@ -68,6 +72,7 @@ const ObservePage = React.memo(() => {
   const { observeId } = useParams();
   const { data: projectDetail } = useGetProjectDetails(observeId);
   const { data: savedViewsData } = useGetSavedViews(observeId);
+  const queryClient = useQueryClient();
 
   // Tab store state for modals and context menu
   const {
@@ -124,13 +129,20 @@ const ObservePage = React.memo(() => {
     (tabKey) => {
       setActiveTab(tabKey);
 
-      // Set activeViewConfig from saved view data
+      // Set activeViewConfig from saved view data. Read from queryClient
+      // directly rather than the `savedViewsData` closure, which can be stale
+      // immediately after an optimistic cache write (e.g., right after a new
+      // view is created — the closure hasn't re-rendered yet but the cache has).
+      let activeConfig = null;
       if (tabKey.startsWith("view-")) {
         const viewId = tabKey.replace("view-", "");
-        const view = (
-          savedViewsData?.customViews ?? savedViewsData?.custom_views
-        )?.find((v) => v.id === viewId);
-        setActiveViewConfig(view?.config || null);
+        const cached = queryClient.getQueryData([SAVED_VIEWS_KEY, observeId]);
+        const cachedResult = cached?.data?.result;
+        const customViews =
+          cachedResult?.customViews ?? cachedResult?.custom_views ?? [];
+        const view = customViews.find((v) => v.id === viewId);
+        activeConfig = view?.config || null;
+        setActiveViewConfig(activeConfig);
       } else {
         setActiveViewConfig(null);
       }
@@ -138,7 +150,37 @@ const ObservePage = React.memo(() => {
       // Navigate to the appropriate route
       if (tabKey.startsWith("view-")) {
         const basePath = `/dashboard/observe/${observeId}/llm-tracing`;
-        navigate(`${basePath}?tab=${tabKey}&selectedTab=trace`, {
+        // Inline all URL-synced state from the saved view so useUrlState hooks
+        // read the correct values on this navigation (avoids a race where the
+        // apply effect would try to re-write the URL and lose params).
+        const params = new URLSearchParams();
+        params.set("tab", tabKey);
+        params.set("selectedTab", "trace");
+        if (activeConfig?.filters) {
+          params.set(
+            "primaryTraceFilter",
+            JSON.stringify(activeConfig.filters),
+          );
+        }
+        if (activeConfig?.display?.dateFilter) {
+          params.set(
+            "primaryTraceDateFilter",
+            JSON.stringify(activeConfig.display.dateFilter),
+          );
+        }
+        if (activeConfig?.compareFilters) {
+          params.set(
+            "compareTraceFilter",
+            JSON.stringify(activeConfig.compareFilters),
+          );
+        }
+        if (activeConfig?.compareDateFilter) {
+          params.set(
+            "compareTraceDateFilter",
+            JSON.stringify(activeConfig.compareDateFilter),
+          );
+        }
+        navigate(`${basePath}?${params.toString()}`, {
           replace: true,
         });
       } else {
@@ -156,7 +198,7 @@ const ObservePage = React.memo(() => {
       observeId,
       navigate,
       setActiveTab,
-      savedViewsData?.customViews ?? savedViewsData?.custom_views,
+      queryClient,
       setActiveViewConfig,
     ],
   );

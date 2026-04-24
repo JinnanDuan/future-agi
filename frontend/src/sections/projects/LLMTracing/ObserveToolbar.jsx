@@ -49,6 +49,7 @@ const ObserveToolbar = ({
   setDateFilter,
   // Filter
   hasActiveFilter,
+  canSaveView,
   isFilterOpen,
   onFilterToggle,
   filters,
@@ -467,8 +468,8 @@ const ObserveToolbar = ({
             }}
           />
 
-          {/* Save view — appears when filters are active (traces only) */}
-          {isTraces && hasActiveFilter && (
+          {/* Save view — appears when there's any savable state (traces only) */}
+          {isTraces && canSaveView && (
             <Button
               variant="outlined"
               size="small"
@@ -572,6 +573,7 @@ ObserveToolbar.propTypes = {
   dateFilter: PropTypes.object,
   setDateFilter: PropTypes.func,
   hasActiveFilter: PropTypes.bool,
+  canSaveView: PropTypes.bool,
   isFilterOpen: PropTypes.bool,
   onFilterToggle: PropTypes.func,
   filters: PropTypes.array,

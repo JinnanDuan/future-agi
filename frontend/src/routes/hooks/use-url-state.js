@@ -32,41 +32,51 @@ export function useUrlState(key, defaultValue) {
   // Update both state and URL
   const setValue = useCallback(
     (newValue, options = { replace: true }) => {
-      // Update state using functional update to ensure latest value
       setStateValue((currentValue) => {
         const nextValue =
           typeof newValue === "function" ? newValue(currentValue) : newValue;
 
-        // Mark this as an internal update
         isInternalUpdate.current = true;
 
-        // Update URL
-        const newSearchParams = new URLSearchParams(window.location.search);
-        newSearchParams.set(key, stringifyUrlValue(nextValue));
-        setSearchParams(newSearchParams, { replace: options.replace });
+        // Functional form merges with the latest URL params so concurrent
+        // setValue calls from different useUrlState hooks don't clobber each
+        // other's writes in the same tick.
+        setSearchParams(
+          (prev) => {
+            const next = new URLSearchParams(prev);
+            next.set(key, stringifyUrlValue(nextValue));
+            return next;
+          },
+          { replace: options.replace },
+        );
 
         return nextValue;
       });
     },
-    [key, setSearchParams], // Removed value from dependencies since we use functional updates
+    [key, setSearchParams],
   );
+
   const removeValue = useCallback(
     (options = { replace: true }) => {
       isInternalUpdate.current = true;
 
-      const newSearchParams = new URLSearchParams(window.location.search);
-      newSearchParams.delete(key);
-      setSearchParams(newSearchParams, { replace: options.replace });
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete(key);
+          return next;
+        },
+        { replace: options.replace },
+      );
 
-      // Reset state (or set to undefined if you prefer).
       setStateValue(defaultValue);
     },
     [key, setSearchParams, defaultValue],
   );
+
   // Handle external URL changes (like browser back/forward)
   useEffect(() => {
     if (isInternalUpdate.current) {
-      // Reset the flag and skip the updateuseUrlState
       isInternalUpdate.current = false;
       return;
     }
@@ -78,10 +88,15 @@ export function useUrlState(key, defaultValue) {
       return;
     }
 
-    // Update state only if the change came from external source
     const newValue = parseUrlValue(searchParams.get(key), defaultValue);
     setStateValue(newValue);
-  }, [searchParams, key, defaultValue, value]);
+    // Dep array intentionally excludes `value`: the effect should only fire on
+    // external URL changes. Including `value` causes spurious reruns on every
+    // state update, where the stringified comparison can register a false
+    // mismatch (e.g., when state carries a random id not in the URL payload)
+    // and reset the state back to the URL's default.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, key, defaultValue]);
 
   return [value, setValue, removeValue];
 }
