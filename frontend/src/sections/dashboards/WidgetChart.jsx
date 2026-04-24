@@ -94,13 +94,17 @@ export default function WidgetChart({ widget, globalDateRange }) {
   const pieChartRef = useRef(null);
   const [pieConnectors, setPieConnectors] = useState([]);
 
-  // Re-query whenever widget.id or globalDateRange changes
-  const queryKey = `${widget.id}-${globalDateRange?.start || "default"}`;
+  // Re-query whenever the effective query config changes (including
+  // metric aggregation/value type), or when global date override changes.
+  const querySignature = useMemo(
+    () => JSON.stringify(queryConfig || {}),
+    [queryConfig],
+  );
   useEffect(() => {
     if (queryConfig?.metrics?.length > 0) {
       queryMutation.mutate(queryConfig);
     }
-  }, [queryKey]);
+  }, [querySignature, queryConfig]);
 
   const result = queryMutation.data?.data?.result;
   const series = useMemo(() => {
