@@ -18,6 +18,10 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from tracer.services.clickhouse.query_builders.expressions import (
+    annotation_numeric_value_expr,
+)
+
 logger = logging.getLogger(__name__)
 
 # Allowed characters for ClickHouse map keys: alphanumeric, dots, underscores, hyphens
@@ -133,12 +137,6 @@ AGGREGATIONS: Dict[str, str] = {
     "count_distinct": "uniq({col})",
     "sum": "sum({col})",
 }
-
-ANNOTATION_NUMERIC_VALUE_EXPR = (
-    "if(JSONHas({alias}.value, 'rating'), "
-    "JSONExtractFloat({alias}.value, 'rating'), "
-    "JSONExtractFloat({alias}.value, 'value'))"
-)
 
 FILTER_OPERATORS: Dict[str, str] = {
     "less_than": "< %({prefix}{idx}_val)s",
@@ -791,7 +789,7 @@ class DashboardQueryBuilder:
             agg_expr = "count()"
         else:
             # Numeric/star: average of the float value
-            col_expr = ANNOTATION_NUMERIC_VALUE_EXPR.format(alias="a")
+            col_expr = annotation_numeric_value_expr(alias="a")
             agg_expr = AGGREGATIONS.get(aggregation, "avg({col})").format(col=col_expr)
 
         select_parts = [f"{bucket_fn}(a.created_at) AS time_bucket"]
@@ -1112,12 +1110,12 @@ class DashboardQueryBuilder:
                 elif output_type in ("numeric", "star"):
                     val_expr = (
                         f"if({alias}.trace_id IS NULL, '(not set)', "
-                        f"toString(round({ANNOTATION_NUMERIC_VALUE_EXPR.format(alias=alias)}, 1)))"
+                        f"toString(round({annotation_numeric_value_expr(alias=alias)}, 1)))"
                     )
                 else:
                     val_expr = (
                         f"if({alias}.trace_id IS NULL, '(not set)', "
-                        f"toString({ANNOTATION_NUMERIC_VALUE_EXPR.format(alias=alias)}))"
+                        f"toString({annotation_numeric_value_expr(alias=alias)}))"
                     )
 
                 join_clause = (
@@ -1403,7 +1401,7 @@ class DashboardQueryBuilder:
                     f"SELECT toString(trace_id) FROM model_hub_score FINAL "
                     f"WHERE label_id = toUUID(%({label_id_key})s) "
                     f"AND organization_id = toUUID(%({ann_org_key})s) "
-                    f"AND {ANNOTATION_NUMERIC_VALUE_EXPR.format(alias='model_hub_score')} "
+                    f"AND {annotation_numeric_value_expr(alias='model_hub_score')} "
                     f"{op_symbol} %({val_key})s "
                     f"AND _peerdb_is_deleted = 0"
                     f")"

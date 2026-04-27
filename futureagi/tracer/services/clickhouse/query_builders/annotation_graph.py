@@ -18,12 +18,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from tracer.services.clickhouse.query_builders.base import BaseQueryBuilder
-
-
-ANNOTATION_NUMERIC_VALUE_EXPR = (
-    "if(JSONHas(value, 'rating'), "
-    "JSONExtractFloat(value, 'rating'), "
-    "JSONExtractFloat(value, 'value'))"
+from tracer.services.clickhouse.query_builders.expressions import (
+    annotation_numeric_value_expr,
 )
 
 
@@ -147,7 +143,7 @@ class AnnotationGraphQueryBuilder(BaseQueryBuilder):
         query = f"""
         SELECT
             {bucket_fn}(created_at) AS time_bucket,
-            avg({ANNOTATION_NUMERIC_VALUE_EXPR}) AS value
+            avg({annotation_numeric_value_expr()}) AS value
         FROM {self.TABLE} FINAL
         WHERE _peerdb_is_deleted = 0
           AND label_id = toUUID(%(label_id)s)
