@@ -75,6 +75,8 @@ const escapeCsvField = (field) => {
   return str;
 };
 
+const DEFAULT_DECIMALS = 2;
+
 const getSeriesAverage = (points = []) => {
   let total = 0;
   let count = 0;
@@ -86,6 +88,71 @@ const getSeriesAverage = (points = []) => {
     count += 1;
   }
   return count > 0 ? total / count : null;
+};
+
+const getAutoDecimals = (series = []) => {
+  let minAbs = Infinity;
+  for (const s of series) {
+    for (const pt of s.data || []) {
+      const raw = typeof pt === "number" ? pt : pt?.y;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) continue;
+      const abs = Math.abs(value);
+      if (abs > 0 && abs < minAbs) minAbs = abs;
+    }
+  }
+  if (minAbs === Infinity || minAbs >= 0.01) return DEFAULT_DECIMALS;
+  if (minAbs >= 0.001) return 3;
+  return 4;
+};
+
+const UNIT_LESS_AGGREGATIONS = new Set([
+  "count",
+  "count_distinct",
+  "pass_count",
+  "fail_count",
+]);
+
+const getSuggestedUnitConfig = (metricConfigs = []) => {
+  if (
+    metricConfigs.some((metric) =>
+      UNIT_LESS_AGGREGATIONS.has(metric?.aggregation),
+    )
+  ) {
+    return { unit: "", prefixSuffix: "prefix" };
+  }
+  const uniqueUnits = [
+    ...new Set(metricConfigs.map((metric) => metric?.unit).filter(Boolean)),
+  ];
+  if (uniqueUnits.length !== 1) {
+    return { unit: "", prefixSuffix: "prefix" };
+  }
+  const [unit] = uniqueUnits;
+  if (unit === "$") return { unit, prefixSuffix: "prefix" };
+  if (unit === "%") return { unit, prefixSuffix: "suffix" };
+  return { unit: "", prefixSuffix: "prefix" };
+};
+
+const formatValueWithConfig = (
+  val,
+  cfg,
+  { fallbackDecimals = DEFAULT_DECIMALS, includeUnit = true } = {},
+) => {
+  if (val == null) return "-";
+  const num = Number(val);
+  if (!Number.isFinite(num)) return "-";
+  const dec = Math.max(0, Math.min(6, cfg?.decimals ?? fallbackDecimals));
+  const unit = includeUnit ? cfg?.unit || "" : "";
+  const prefixSuffix = cfg?.prefixSuffix || "prefix";
+  let str;
+  if (Boolean(cfg?.abbreviation ?? true) && Math.abs(num) >= 1000000) {
+    str = `${(num / 1000000).toFixed(dec)}M`;
+  } else if (Boolean(cfg?.abbreviation ?? true) && Math.abs(num) >= 1000) {
+    str = `${(num / 1000).toFixed(dec)}K`;
+  } else {
+    str = num.toFixed(dec);
+  }
+  return prefixSuffix === "suffix" ? `${str}${unit}` : `${unit}${str}`;
 };
 
 const TIME_PRESETS = [
@@ -530,9 +597,12 @@ function AxisSection({ title, config, onChange, theme, showReset, onReset }) {
           options={[
             {
               label: "\u2190 .0",
-              value: Math.max(0, (config.decimals || 1) - 1),
+              value: Math.max(0, (config.decimals ?? DEFAULT_DECIMALS) - 1),
             },
-            { label: ".00 \u2192", value: (config.decimals || 1) + 1 },
+            {
+              label: ".00 \u2192",
+              value: (config.decimals ?? DEFAULT_DECIMALS) + 1,
+            },
           ]}
           value={null}
           onChange={(v) => onChange("decimals", Math.max(0, Math.min(6, v)))}
@@ -553,18 +623,9 @@ function AxisSection({ title, config, onChange, theme, showReset, onReset }) {
         <Typography variant="body2" fontWeight={500}>
           {(() => {
             const sample = 1250000;
-            const abbr = config.abbreviation;
-            const dec = config.decimals ?? 1;
-            const val =
-              abbr && sample >= 1000000
-                ? `${(sample / 1000000).toFixed(dec)}M`
-                : abbr && sample >= 1000
-                  ? `${(sample / 1000).toFixed(dec)}K`
-                  : sample.toFixed(dec);
-            const unit = config.unit || "";
-            return config.prefixSuffix === "suffix"
-              ? `${val}${unit}`
-              : `${unit}${val}`;
+            return formatValueWithConfig(sample, config, {
+              fallbackDecimals: DEFAULT_DECIMALS,
+            });
           })()}
         </Typography>
       </Stack>
@@ -1235,7 +1296,7 @@ export default function WidgetEditorView() {
       unit: "",
       prefixSuffix: "prefix",
       abbreviation: true,
-      decimals: 1,
+      decimals: DEFAULT_DECIMALS,
       min: "",
       max: "",
       outOfBounds: "visible",
@@ -1247,7 +1308,7 @@ export default function WidgetEditorView() {
       unit: "",
       prefixSuffix: "prefix",
       abbreviation: true,
-      decimals: 1,
+      decimals: DEFAULT_DECIMALS,
       min: "",
       max: "",
       outOfBounds: "hidden",
@@ -1256,6 +1317,8 @@ export default function WidgetEditorView() {
     xAxis: { visible: true, label: "" },
     seriesAxis: {}, // { [seriesIndex]: "left" | "right" }
   });
+  const [hasAutoAppliedLeftAxisUnit, setHasAutoAppliedLeftAxisUnit] =
+    useState(false);
   const updateAxis = (axis, key, val) =>
     setAxisConfig((prev) => ({
       ...prev,
@@ -2002,6 +2065,46 @@ export default function WidgetEditorView() {
     return previewSeries.filter((_, i) => visibleSeries.has(i));
   }, [previewSeries, visibleSeries]);
 
+  const autoDecimals = useMemo(() => getAutoDecimals(chartSeries), [chartSeries]);
+  const suggestedLeftAxisUnit = useMemo(
+    () => getSuggestedUnitConfig(metrics),
+    [metrics],
+  );
+  const leftAxisFormatConfig = useMemo(() => {
+    const leftAxis = axisConfig.leftY || {};
+    return {
+      ...leftAxis,
+      unit: leftAxis.unit || suggestedLeftAxisUnit.unit,
+      prefixSuffix:
+        leftAxis.unit || !suggestedLeftAxisUnit.unit
+          ? leftAxis.prefixSuffix || "prefix"
+          : suggestedLeftAxisUnit.prefixSuffix,
+    };
+  }, [axisConfig.leftY, suggestedLeftAxisUnit]);
+
+  useEffect(() => {
+    if (
+      hasAutoAppliedLeftAxisUnit ||
+      axisConfig.leftY.unit ||
+      !suggestedLeftAxisUnit.unit
+    ) {
+      return;
+    }
+    setAxisConfig((prev) => ({
+      ...prev,
+      leftY: {
+        ...prev.leftY,
+        unit: suggestedLeftAxisUnit.unit,
+        prefixSuffix: suggestedLeftAxisUnit.prefixSuffix,
+      },
+    }));
+    setHasAutoAppliedLeftAxisUnit(true);
+  }, [
+    axisConfig.leftY.unit,
+    hasAutoAppliedLeftAxisUnit,
+    suggestedLeftAxisUnit,
+  ]);
+
   // Colors that match chartSeries — preserves original color assignment even when series are filtered out
   const chartColors = useMemo(() => {
     if (visibleSeries === null) return SERIES_COLORS;
@@ -2035,20 +2138,11 @@ export default function WidgetEditorView() {
 
   const isDark = theme.palette.mode === "dark";
   const formatValFn = useCallback(
-    (val) => {
-      if (val == null) return "-";
-      const cfg = axisConfig.leftY;
-      const dec = cfg.decimals ?? 1;
-      const unit = cfg.unit || "";
-      let str;
-      if (cfg.abbreviation && Math.abs(val) >= 1000000)
-        str = `${(val / 1000000).toFixed(dec)}M`;
-      else if (cfg.abbreviation && Math.abs(val) >= 1000)
-        str = `${(val / 1000).toFixed(dec)}K`;
-      else str = val.toFixed(dec);
-      return cfg.prefixSuffix === "suffix" ? `${str}${unit}` : `${unit}${str}`;
-    },
-    [axisConfig.leftY],
+    (val) =>
+      formatValueWithConfig(val, leftAxisFormatConfig, {
+        fallbackDecimals: autoDecimals,
+      }),
+    [autoDecimals, leftAxisFormatConfig],
   );
 
   const chartOptions = useMemo(() => {
@@ -2120,19 +2214,11 @@ export default function WidgetEditorView() {
         },
       };
     }
-    const makeFormatter = (cfg) => (val) => {
-      if (val == null) return "-";
-      const dec = cfg.decimals ?? 1;
-      const unit = cfg.unit || "";
-      let str;
-      if (cfg.abbreviation && Math.abs(val) >= 1000000)
-        str = `${(val / 1000000).toFixed(dec)}M`;
-      else if (cfg.abbreviation && Math.abs(val) >= 1000)
-        str = `${(val / 1000).toFixed(dec)}K`;
-      else str = val.toFixed(dec);
-      return cfg.prefixSuffix === "suffix" ? `${str}${unit}` : `${unit}${str}`;
-    };
-    const formatVal = makeFormatter(axisConfig.leftY);
+    const makeFormatter =
+      (cfg, fallbackDecimals = autoDecimals, includeUnit = true) =>
+      (val) =>
+        formatValueWithConfig(val, cfg, { fallbackDecimals, includeUnit });
+    const formatVal = makeFormatter(leftAxisFormatConfig);
     return {
       chart: {
         type: apexType,
@@ -2481,7 +2567,6 @@ export default function WidgetEditorView() {
           },
     };
   }, [
-    chartType,
     apexType,
     isStacked,
     isHorizontal,
@@ -2490,6 +2575,9 @@ export default function WidgetEditorView() {
     chartColors,
     theme,
     axisConfig,
+    autoDecimals,
+    isDark,
+    leftAxisFormatConfig,
     visibleSeries,
   ]);
 
@@ -2568,11 +2656,15 @@ export default function WidgetEditorView() {
     });
     const values = chartSeries.map((s) => {
       const avg = getSeriesAverage(s.data);
-      return avg == null ? 0 : avg;
+      return {
+        value: avg,
+        numericValue: avg == null ? 0 : avg,
+      };
     });
     return {
       categories,
-      series: [{ name: "Value", data: values }],
+      series: [{ name: "Value", data: values.map((item) => item.numericValue) }],
+      rows: values,
     };
   }, [isHorizontal, chartSeries]);
 
@@ -3265,7 +3357,8 @@ export default function WidgetEditorView() {
                           </Box>
                           {/* Bar rows */}
                           <Box sx={{ flex: 1, overflow: "auto", px: 2 }}>
-                            {barData.series[0].data.map((val, i) => {
+                            {barData.rows.map((row, i) => {
+                              const val = row.numericValue;
                               const origIdx =
                                 visibleSeries === null
                                   ? i
@@ -3279,7 +3372,8 @@ export default function WidgetEditorView() {
                                 ];
                               const pct =
                                 maxVal > 0 ? (Math.abs(val) / maxVal) * 100 : 0;
-                              const fmtVal = formatValFn(val);
+                              const fmtVal =
+                                row.value == null ? "—" : formatValFn(row.value);
                               return (
                                 <Box
                                   key={i}
@@ -3539,9 +3633,7 @@ export default function WidgetEditorView() {
                               >
                                 {avg == null
                                   ? "—"
-                                  : avg >= 1000
-                                    ? `${(avg / 1000).toFixed(1)}K`
-                                    : avg.toFixed(1)}
+                                  : formatValFn(avg)}
                               </Typography>
                               <Typography
                                 variant="body2"
@@ -4274,11 +4366,7 @@ export default function WidgetEditorView() {
                                 >
                                   {avg == null
                                     ? "—"
-                                    : avg >= 1000
-                                      ? avg.toLocaleString(undefined, {
-                                          maximumFractionDigits: 1,
-                                        })
-                                      : avg.toFixed(1)}
+                                    : formatValFn(avg)}
                                 </td>
                                 {s.data.map((pt, ci) => {
                                   if (!displayIndicesSet.has(ci)) return null;
@@ -5722,7 +5810,7 @@ export default function WidgetEditorView() {
                           unit: "",
                           prefixSuffix: "prefix",
                           abbreviation: true,
-                          decimals: 1,
+                          decimals: DEFAULT_DECIMALS,
                           min: "",
                           max: "",
                           outOfBounds: "visible",
@@ -5750,7 +5838,7 @@ export default function WidgetEditorView() {
                           unit: "",
                           prefixSuffix: "prefix",
                           abbreviation: true,
-                          decimals: 1,
+                          decimals: DEFAULT_DECIMALS,
                           min: "",
                           max: "",
                           outOfBounds: "hidden",

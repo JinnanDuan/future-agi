@@ -18,6 +18,7 @@ const escapeHtml = (str) => {
 };
 
 const CHART_HEIGHT_FALLBACK = 280;
+const DEFAULT_DECIMALS = 2;
 const COLORS = [
   "#7B56DB", // purple (primary)
   "#1ABCFE", // cyan
@@ -55,6 +56,69 @@ function getSeriesAverage(points = []) {
     count += 1;
   }
   return count > 0 ? total / count : null;
+}
+
+function getAutoDecimals(series = []) {
+  let minAbs = Infinity;
+  for (const s of series) {
+    for (const pt of s.data || []) {
+      const raw = typeof pt === "number" ? pt : pt?.y;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) continue;
+      const abs = Math.abs(value);
+      if (abs > 0 && abs < minAbs) minAbs = abs;
+    }
+  }
+  if (minAbs === Infinity || minAbs >= 0.01) return DEFAULT_DECIMALS;
+  if (minAbs >= 0.001) return 3;
+  return 4;
+}
+
+const UNIT_LESS_AGGREGATIONS = new Set([
+  "count",
+  "count_distinct",
+  "pass_count",
+  "fail_count",
+]);
+
+function getSuggestedUnitConfig(metricConfigs = []) {
+  if (
+    metricConfigs.some((metric) =>
+      UNIT_LESS_AGGREGATIONS.has(metric?.aggregation),
+    )
+  ) {
+    return { unit: "", prefixSuffix: "prefix" };
+  }
+  const uniqueUnits = [...new Set(metricConfigs.map((metric) => metric?.unit).filter(Boolean))];
+  if (uniqueUnits.length !== 1) {
+    return { unit: "", prefixSuffix: "prefix" };
+  }
+  const [unit] = uniqueUnits;
+  if (unit === "$") return { unit, prefixSuffix: "prefix" };
+  if (unit === "%") return { unit, prefixSuffix: "suffix" };
+  return { unit: "", prefixSuffix: "prefix" };
+}
+
+function formatValueWithConfig(
+  val,
+  cfg,
+  { fallbackDecimals = DEFAULT_DECIMALS, includeUnit = true } = {},
+) {
+  if (val == null) return "-";
+  const num = Number(val);
+  if (!Number.isFinite(num)) return "-";
+  const dec = Math.max(0, Math.min(6, cfg?.decimals ?? fallbackDecimals));
+  const unit = includeUnit ? cfg?.unit || "" : "";
+  const prefixSuffix = cfg?.prefixSuffix || "prefix";
+  let str;
+  if (Boolean(cfg?.abbreviation ?? true) && Math.abs(num) >= 1000000) {
+    str = `${(num / 1000000).toFixed(dec)}M`;
+  } else if (Boolean(cfg?.abbreviation ?? true) && Math.abs(num) >= 1000) {
+    str = `${(num / 1000).toFixed(dec)}K`;
+  } else {
+    str = num.toFixed(dec);
+  }
+  return prefixSuffix === "suffix" ? `${str}${unit}` : `${unit}${str}`;
 }
 
 export default function WidgetChart({ widget, globalDateRange }) {
@@ -185,19 +249,19 @@ export default function WidgetChart({ widget, globalDateRange }) {
 
   // Compute Y-axis precision once from the data range so all ticks use the
   // same number of decimals (avoids "0.0 / 0.0 / 0.02" inconsistency).
-  const autoDecimals = useMemo(() => {
-    let minAbs = Infinity;
-    for (const s of chartSeries) {
-      for (const pt of s.data || []) {
-        const v = Math.abs(pt.y ?? pt);
-        if (v > 0 && v < minAbs) minAbs = v;
-      }
-    }
-    if (minAbs === Infinity || minAbs >= 0.1) return 1;
-    if (minAbs >= 0.01) return 2;
-    if (minAbs >= 0.001) return 3;
-    return 4;
-  }, [chartSeries]);
+  const autoDecimals = useMemo(() => getAutoDecimals(chartSeries), [chartSeries]);
+  const leftAxisFormatConfig = useMemo(() => {
+    const suggested = getSuggestedUnitConfig(result?.metrics || []);
+    const leftAxis = axisConfig?.leftY || {};
+    return {
+      ...leftAxis,
+      unit: leftAxis.unit || suggested.unit,
+      prefixSuffix:
+        leftAxis.unit || !suggested.unit
+          ? leftAxis.prefixSuffix || "prefix"
+          : suggested.prefixSuffix,
+    };
+  }, [axisConfig?.leftY, result?.metrics]);
 
   useEffect(() => {
     if (!isPie || !pieValues.length) {
@@ -252,6 +316,13 @@ export default function WidgetChart({ widget, globalDateRange }) {
     }, 400);
     return () => clearTimeout(timer);
   }, [isPie, pieValues, chartSeries]);
+
+  const isDark = theme.palette.mode === "dark";
+  const makeFormatter =
+    (cfg, fallbackDecimals = autoDecimals, includeUnit = true) =>
+    (val) =>
+      formatValueWithConfig(val, cfg, { fallbackDecimals, includeUnit });
+  const formatVal = makeFormatter(leftAxisFormatConfig);
 
   if (queryMutation.isPending) {
     return (
@@ -332,9 +403,7 @@ export default function WidgetChart({ widget, globalDateRange }) {
               >
                 {avg == null
                   ? "—"
-                  : avg >= 1000
-                    ? `${(avg / 1000).toFixed(1)}K`
-                    : avg.toFixed(1)}
+                  : formatVal(avg)}
               </Typography>
               <Typography variant="caption" color="text.secondary">
                 {s.name}
@@ -490,13 +559,10 @@ export default function WidgetChart({ widget, globalDateRange }) {
                         }}
                       >
                         {val != null
-                          ? val >= 1000
-                            ? val.toLocaleString(undefined, {
-                                maximumFractionDigits: 0,
-                              })
-                            : val % 1 === 0
-                              ? val
-                              : val.toFixed(2)
+                          ? formatValueWithConfig(val, leftAxisFormatConfig, {
+                              fallbackDecimals: autoDecimals,
+                              includeUnit: false,
+                            })
                           : "-"}
                       </td>
                     );
@@ -655,30 +721,16 @@ export default function WidgetChart({ widget, globalDateRange }) {
     );
   }
 
-  // Line / Column / Bar (+ stacked variants)
-  const isDark = theme.palette.mode === "dark";
-
-  const makeFormatter = (cfg) => (val) => {
-    if (val == null) return "-";
-    const dec = cfg?.decimals ?? 1;
-    const unit = cfg?.unit || "";
-    let str;
-    if (Boolean(cfg?.abbreviation ?? true) && Math.abs(val) >= 1000000)
-      str = `${(val / 1000000).toFixed(dec)}M`;
-    else if (Boolean(cfg?.abbreviation ?? true) && Math.abs(val) >= 1000)
-      str = `${(val / 1000).toFixed(dec)}K`;
-    else str = val.toFixed(dec);
-    return cfg?.prefixSuffix === "suffix" ? `${str}${unit}` : `${unit}${str}`;
-  };
-  const formatVal = makeFormatter(axisConfig?.leftY);
-
   // Bar chart — horizontal bar table
   if (isHorizontal) {
-    const barValues = chartSeries.map((s) => {
+    const barRows = chartSeries.map((s) => {
       const avg = getSeriesAverage(s.data);
-      return avg == null ? 0 : avg;
+      return {
+        value: avg,
+        numericValue: avg == null ? 0 : avg,
+      };
     });
-    const maxVal = Math.max(...barValues.map(Math.abs), 1);
+    const maxVal = Math.max(...barRows.map((row) => Math.abs(row.numericValue)), 1);
     return (
       <Box
         ref={containerRef}
@@ -760,7 +812,8 @@ export default function WidgetChart({ widget, globalDateRange }) {
         </Box>
         {/* Bar rows */}
         <Box sx={{ flex: 1, overflow: "auto", px: 2 }}>
-          {barValues.map((val, i) => {
+          {barRows.map((row, i) => {
+            const val = row.numericValue;
             const color = COLORS[i % COLORS.length];
             const pct = maxVal > 0 ? (Math.abs(val) / maxVal) * 100 : 0;
             const name = chartSeries[i]?.name || "";
@@ -836,7 +889,7 @@ export default function WidgetChart({ widget, globalDateRange }) {
                       flexShrink: 0,
                     }}
                   >
-                    {formatVal(val)}
+                    {row.value == null ? "—" : formatVal(row.value)}
                   </Typography>
                 </Box>
               </Box>
