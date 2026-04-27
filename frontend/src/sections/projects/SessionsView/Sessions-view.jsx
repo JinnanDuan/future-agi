@@ -177,6 +177,7 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
   const {
     setHeaderConfig,
     activeViewConfig,
+    setActiveViewConfig,
     registerGetViewConfig,
     registerGetTabType,
   } = useObserveHeader();
@@ -389,8 +390,10 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
     mutate(
       { id: activeViewTabId, config },
       {
-        onSuccess: () =>
-          enqueueSnackbar("View updated", { variant: "success" }),
+        onSuccess: (response) => {
+          setActiveViewConfig(response?.data?.result?.config ?? config);
+          enqueueSnackbar("View updated", { variant: "success" });
+        },
         onError: () =>
           enqueueSnackbar("Failed to update view", { variant: "error" }),
       },
@@ -401,6 +404,7 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
     isUserMode,
     updateSavedView,
     updateWorkspaceSavedView,
+    setActiveViewConfig,
   ]);
 
   // Pending column state queued before the grid was ready. Drain effect
@@ -681,6 +685,7 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
         hasActiveFilter={hasActiveFilter}
         canSaveView={canSaveViewDeferred}
         onSaveView={handleSaveView}
+        graphFilters={extraFilters}
         isFilterOpen={isFilterOpen}
         onFilterToggle={() => setIsFilterOpen(!isFilterOpen)}
         filterFields={sessionFilterFields}

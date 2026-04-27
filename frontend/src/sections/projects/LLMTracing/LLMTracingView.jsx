@@ -854,6 +854,7 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
   const {
     setHeaderConfig,
     activeViewConfig,
+    setActiveViewConfig,
     registerGetViewConfig,
     registerGetTabType,
   } = useObserveHeader();
@@ -1931,8 +1932,11 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
     mutate(
       { id: activeViewTabId, config },
       {
-        onSuccess: () =>
-          enqueueSnackbar("View updated", { variant: "success" }),
+        onSuccess: (response) => {
+          // Refresh the baseline so canSaveView's diff resets to false.
+          setActiveViewConfig(response?.data?.result?.config ?? config);
+          enqueueSnackbar("View updated", { variant: "success" });
+        },
         onError: () =>
           enqueueSnackbar("Failed to update view", { variant: "error" }),
       },
@@ -1943,6 +1947,7 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
     isUserMode,
     updateSavedView,
     updateWorkspaceSavedView,
+    setActiveViewConfig,
   ]);
 
   // Persist display settings to localStorage on the default tab so personal

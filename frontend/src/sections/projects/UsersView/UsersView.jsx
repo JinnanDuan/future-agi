@@ -198,6 +198,7 @@ const UsersView = ({
   const {
     setHeaderConfig,
     activeViewConfig: activeViewConfigCtx,
+    setActiveViewConfig,
     registerGetViewConfig,
     registerGetTabType,
   } = useObserveHeader();
@@ -536,8 +537,13 @@ const UsersView = ({
     mutate(
       { id: activeViewTabId, config },
       {
-        onSuccess: () =>
-          enqueueSnackbar("View updated", { variant: "success" }),
+        onSuccess: (response) => {
+          // Refresh context baseline (Observe path) — UserList path's
+          // activeViewConfig prop refreshes via the mutation's optimistic
+          // setQueryData on the workspace cache.
+          setActiveViewConfig(response?.data?.result?.config ?? config);
+          enqueueSnackbar("View updated", { variant: "success" });
+        },
         onError: () =>
           enqueueSnackbar("Failed to update view", { variant: "error" }),
       },
@@ -548,6 +554,7 @@ const UsersView = ({
     isObservePath,
     updateSavedView,
     updateWorkspaceSavedView,
+    setActiveViewConfig,
   ]);
 
   // Register with ObserveHeaderContext so ObserveTabBar's "+" save flow can
@@ -617,6 +624,7 @@ const UsersView = ({
         hasActiveFilter={hasActiveFilter}
         canSaveView={canSaveViewDeferred}
         onSaveView={handleSaveView}
+        graphFilters={extraFilters}
         isFilterOpen={isFilterOpen}
         onFilterToggle={() => setIsFilterOpen(!isFilterOpen)}
         filterFields={USER_FILTER_FIELDS}

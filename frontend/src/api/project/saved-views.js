@@ -78,7 +78,33 @@ export const useUpdateWorkspaceSavedView = (tabType) => {
   return useMutation({
     mutationFn: ({ id, ...data }) =>
       axios.put(endpoints.savedViews.update(id), data),
-    onSuccess: () => {
+    onSuccess: (response) => {
+      const updated = response?.data?.result;
+      if (updated?.id) {
+        queryClient.setQueryData(
+          [SAVED_VIEWS_KEY, "workspace", tabType],
+          (old) => {
+            if (!old) return old;
+            const currentResult = old.data?.result ?? {};
+            const currentList =
+              currentResult.custom_views ?? currentResult.customViews ?? [];
+            const nextList = currentList.map((v) =>
+              v.id === updated.id ? { ...v, ...updated } : v,
+            );
+            return {
+              ...old,
+              data: {
+                ...old.data,
+                result: {
+                  ...currentResult,
+                  custom_views: nextList,
+                  customViews: nextList,
+                },
+              },
+            };
+          },
+        );
+      }
       queryClient.invalidateQueries({
         queryKey: [SAVED_VIEWS_KEY, "workspace", tabType],
       });
@@ -146,7 +172,30 @@ export const useUpdateSavedView = (projectId) => {
       axios.put(endpoints.savedViews.update(id), data, {
         params: { project_id: projectId },
       }),
-    onSuccess: () => {
+    onSuccess: (response) => {
+      const updated = response?.data?.result;
+      if (updated?.id) {
+        queryClient.setQueryData([SAVED_VIEWS_KEY, projectId], (old) => {
+          if (!old) return old;
+          const currentResult = old.data?.result ?? {};
+          const currentList =
+            currentResult.custom_views ?? currentResult.customViews ?? [];
+          const nextList = currentList.map((v) =>
+            v.id === updated.id ? { ...v, ...updated } : v,
+          );
+          return {
+            ...old,
+            data: {
+              ...old.data,
+              result: {
+                ...currentResult,
+                custom_views: nextList,
+                customViews: nextList,
+              },
+            },
+          };
+        });
+      }
       queryClient.invalidateQueries({
         queryKey: [SAVED_VIEWS_KEY, projectId],
       });
