@@ -280,7 +280,7 @@ function resolveNestedValue(raw, jsonPath) {
     try { parsed = JSON.parse(raw); } catch { return raw; }
   }
   if (!parsed) return raw;
-  const parts = jsonPath.split(/[.\[\]]/).filter(Boolean);
+  const parts = jsonPath.split(/[.[\]]/).filter(Boolean);
   let cur = parsed;
   for (const p of parts) {
     if (cur == null) return undefined;
@@ -875,6 +875,7 @@ const DatasetTestMode = React.forwardRef(
         });
       } else {
         Object.entries(mapping).forEach(([variable, colName]) => {
+          if (!colName) return;
           if (extraNameToField[colName]) { m[variable] = extraNameToField[colName]; return; }
           if (nameToId[colName]) { m[variable] = nameToId[colName]; return; }
           // freeSolo: "col.typed_path" → "uuid.typed_path"
