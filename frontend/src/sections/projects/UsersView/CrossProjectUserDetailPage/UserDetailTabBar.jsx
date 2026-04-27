@@ -125,11 +125,25 @@ const UserDetailTabBar = ({ activeTab, onTabChange }) => {
   useEffect(() => {
     if (lastAppliedTabRef.current === activeTab) return;
 
-    // Fixed tab (sessions/traces): clear activeViewConfig so sub-views
-    // fall back to their URL-driven state.
+    // Fixed tab (sessions/traces): hard-reset the URL down to just `userTab`
+    // so any filter/date/display params left over from a previous saved view
+    // are wiped. useUrlState's external-sync then resets each sub-view's
+    // state to its default.
+    //
+    // The FixedTab onClick handler below already runs this reset
+    // synchronously in the click event tick — that's the primary path and
+    // is what guarantees `setActiveViewConfig(null)` lands in the same
+    // commit as the subTab swap (a `useEffect` reset would be one commit
+    // too late and the newly-mounted sub-view would read the stale custom
+    // config). This branch survives as a safety net for non-click activeTab
+    // transitions, e.g. handleClose at line ~230 calling
+    // `onTabChange("sessions","sessions")` after deleting an active view.
     if (FIXED_TABS.some((t) => t.key === activeTab)) {
+      setSearchParams(new URLSearchParams({ userTab: activeTab }), {
+        replace: true,
+      });
       lastAppliedTabRef.current = activeTab;
-      startTransition(() => setActiveViewConfig(null));
+      setActiveViewConfig(null);
       return;
     }
 
@@ -257,7 +271,20 @@ const UserDetailTabBar = ({ activeTab, onTabChange }) => {
             icon={tab.icon}
             shortcut={tab.shortcut}
             isActive={activeTab === tab.key}
-            onClick={(key) => onTabChange?.(key, key)}
+            onClick={(key) => {
+              // Reset context + URL synchronously in the click event so they
+              // batch with setActiveTab/setSubTab into one commit. Otherwise
+              // the newly-mounted sub-view (e.g. LLMTracingView remounting on
+              // sessions→traces) reads the stale custom-view config from
+              // context during its first render and re-writes the saved
+              // display state back into the URL before the apply useEffect
+              // gets a chance to clear it.
+              setActiveViewConfig(null);
+              setSearchParams(new URLSearchParams({ userTab: key }), {
+                replace: true,
+              });
+              onTabChange?.(key, key);
+            }}
           />
         ))}
       </Box>

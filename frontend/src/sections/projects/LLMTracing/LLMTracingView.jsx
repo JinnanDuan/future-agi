@@ -1597,7 +1597,15 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
 
   // Load filters + display settings from saved view config when a custom view tab is selected
   useEffect(() => {
-    if (!activeViewConfig) return;
+    if (!activeViewConfig) {
+      // Back to a default tab — clear local extraFilters so chips from a
+      // prior custom view don't linger. Intentionally do NOT touch
+      // pendingCustomColumnsRef — the localStorage hydration effect only
+      // queues into it once on mount and we'd erase a still-pending merge
+      // if the backend columns haven't arrived yet.
+      setExtraFilters((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
 
     if (import.meta.env.MODE !== "production") {
       // eslint-disable-next-line no-console

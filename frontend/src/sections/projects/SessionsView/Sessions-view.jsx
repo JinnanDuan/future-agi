@@ -373,7 +373,13 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
   // would just trigger a second data refetch and the resulting header
   // loading flash.
   useEffect(() => {
-    if (!activeViewConfig) return;
+    if (!activeViewConfig) {
+      // Transitioning back to a default tab — clear local extraFilters so
+      // chips from a prior custom view don't linger. (URL-synced state is
+      // wiped by the parent's URL reset.)
+      setExtraFilters((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
     const display = activeViewConfig.display || {};
     if (Array.isArray(display.columnState) && display.columnState.length > 0) {
       const api = sessionGridApiRef.current?.api;
