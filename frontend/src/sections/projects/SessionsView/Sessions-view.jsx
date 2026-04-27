@@ -197,39 +197,6 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
 
   const hasActiveFilter = extraFilters.length > 0;
 
-  // "Save view" only surfaces on a custom saved view when the user has
-  // modified its state. On a default tab the "+" button handles save-as-new,
-  // so we keep Save view out of the toolbar there.
-  const canSaveView = useMemo(() => {
-    if (!activeViewConfig) return false;
-
-    const baselineExtraLen = activeViewConfig.extraFilters?.length ?? 0;
-    const baselineDisplay = activeViewConfig.display || {};
-    const baselineDateOption =
-      baselineDisplay.dateFilter?.dateOption ?? null;
-
-    if ((extraFilters?.length ?? 0) !== baselineExtraLen) return true;
-    if ((dateFilter?.dateOption ?? null) !== baselineDateOption) return true;
-    if (
-      baselineDisplay.cellHeight !== undefined &&
-      baselineDisplay.cellHeight !== cellHeight
-    ) {
-      return true;
-    }
-    if (
-      baselineDisplay.showCompare !== undefined &&
-      baselineDisplay.showCompare !== showCompare
-    ) {
-      return true;
-    }
-    return false;
-  }, [activeViewConfig, extraFilters, dateFilter, cellHeight, showCompare]);
-
-  // Defer so the button doesn't flicker during the one-render gap between
-  // filter state updating urgently and activeViewConfig catching up from
-  // startTransition in the apply path.
-  const canSaveViewDeferred = useDeferredValue(canSaveView);
-
   const handleAddEvals = useCallback(() => {
     const url = buildAddEvalsDraft({
       observeId,
@@ -333,6 +300,39 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
 
   // --- Row height ---
   const [cellHeight, setCellHeight] = useUrlState("sessionCellHeight", "Short");
+
+  // "Save view" only surfaces on a custom saved view when the user has
+  // modified its state. On a default tab the "+" button handles save-as-new,
+  // so we keep Save view out of the toolbar there.
+  const canSaveView = useMemo(() => {
+    if (!activeViewConfig) return false;
+
+    const baselineExtraLen = activeViewConfig.extraFilters?.length ?? 0;
+    const baselineDisplay = activeViewConfig.display || {};
+    const baselineDateOption =
+      baselineDisplay.dateFilter?.dateOption ?? null;
+
+    if ((extraFilters?.length ?? 0) !== baselineExtraLen) return true;
+    if ((dateFilter?.dateOption ?? null) !== baselineDateOption) return true;
+    if (
+      baselineDisplay.cellHeight !== undefined &&
+      baselineDisplay.cellHeight !== cellHeight
+    ) {
+      return true;
+    }
+    if (
+      baselineDisplay.showCompare !== undefined &&
+      baselineDisplay.showCompare !== showCompare
+    ) {
+      return true;
+    }
+    return false;
+  }, [activeViewConfig, extraFilters, dateFilter, cellHeight, showCompare]);
+
+  // Defer so the button doesn't flicker during the one-render gap between
+  // filter state updating urgently and activeViewConfig catching up from
+  // startTransition in the apply path.
+  const canSaveViewDeferred = useDeferredValue(canSaveView);
 
   // --- Saved view capture + apply (TH-4578) ---
   // Build a view-config snapshot that mirrors LLMTracingView's shape. dateFilter
