@@ -192,7 +192,10 @@ import { enqueueSnackbar } from "notistack";
 import {
   useUpdateSavedView,
   useCreateSavedView,
+  useUpdateWorkspaceSavedView,
 } from "src/api/project/saved-views";
+
+const USER_DETAIL_TAB_TYPE = "user_detail";
 
 // Eagerly load the trace grid (always visible)
 import TraceGrid from "./TraceGrid";
@@ -1823,13 +1826,18 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
 
   const { mutate: updateSavedView } = useUpdateSavedView(observeId);
   const { mutate: createSavedView } = useCreateSavedView(observeId);
+  // Workspace-scoped update for user_detail mode (CrossProjectUserDetailPage).
+  // Always declared (hooks can't be conditional); only invoked when isUserMode.
+  const { mutate: updateWorkspaceSavedView } =
+    useUpdateWorkspaceSavedView(USER_DETAIL_TAB_TYPE);
 
-  // Get active view tab ID from URL
+  // Get active view tab ID from URL. The tab-key URL param differs per
+  // surface: "tab" on ObservePage, "userTab" on CrossProjectUserDetailPage.
   const activeViewTabId = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
-    const tab = params.get("tab");
+    const tab = isUserMode ? params.get("userTab") : params.get("tab");
     return tab?.startsWith("view-") ? tab.replace("view-", "") : null;
-  }, [activeViewConfig]); // re-derive when view config changes
+  }, [activeViewConfig, isUserMode]); // re-derive when view config changes
 
   // Build the full saved view config payload
   const buildViewConfig = useCallback(() => {
@@ -1914,9 +1922,40 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
     return () => registerGetTabType(null);
   }, [registerGetTabType, selectedTab]);
 
-  // Auto-save display settings when they change
-  const autoSaveTimerRef = useRef(null);
+  // Explicit "Save view" — overwrite the active saved view's config with the
+  // current live state. Bound to ObserveToolbar's Save view button.
+  const handleSaveView = useCallback(() => {
+    if (!activeViewTabId) return;
+    const config = buildViewConfig();
+    const mutate = isUserMode ? updateWorkspaceSavedView : updateSavedView;
+    mutate(
+      { id: activeViewTabId, config },
+      {
+        onSuccess: () =>
+          enqueueSnackbar("View updated", { variant: "success" }),
+        onError: () =>
+          enqueueSnackbar("Failed to update view", { variant: "error" }),
+      },
+    );
+  }, [
+    activeViewTabId,
+    buildViewConfig,
+    isUserMode,
+    updateSavedView,
+    updateWorkspaceSavedView,
+  ]);
+
+  // Persist display settings to localStorage on the default tab so personal
+  // preferences (cellHeight, viewMode, …) survive across navigation. The
+  // backend-update branch that used to live here was removed: filter/date
+  // state was never in the dep array, so it silently missed those changes.
+  // Updates to a saved view are now triggered explicitly by handleSaveView
+  // (the Save view button in the toolbar).
   useEffect(() => {
+    // Default tab only — persist personal display preferences to localStorage
+    // so cellHeight / viewMode / etc. survive across navigation. Saved-view
+    // tabs go through the explicit Save view button (handleSaveView) instead.
+    if (activeViewTabId) return;
     const currentDisplay = {
       viewMode,
       cellHeight,
@@ -1926,25 +1965,11 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
       hasEvalFilter,
       customColumns: getCustomColumns(),
     };
-
-    // For default tab (no custom view), persist to localStorage
-    if (!activeViewTabId) {
-      try {
-        localStorage.setItem(displayStorageKey, JSON.stringify(currentDisplay));
-      } catch {
-        /* quota exceeded */
-      }
-      return;
+    try {
+      localStorage.setItem(displayStorageKey, JSON.stringify(currentDisplay));
+    } catch {
+      /* quota exceeded */
     }
-
-    // For custom view tabs, debounced auto-save to backend
-    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    autoSaveTimerRef.current = setTimeout(() => {
-      updateSavedView({ id: activeViewTabId, config: buildViewConfig() });
-    }, 1500);
-    return () => {
-      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     viewMode,
@@ -3018,6 +3043,7 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
               }
               hasActiveFilter={hasActiveFilter}
               canSaveView={canSaveViewDeferred}
+              onSaveView={handleSaveView}
               onFilterToggle={() => {
                 // Clear any chip/+ anchor so the popover re-anchors to the
                 // toolbar Filter button (avoids opening on a stale anchor).

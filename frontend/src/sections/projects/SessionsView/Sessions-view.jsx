@@ -1,5 +1,11 @@
 import { Box } from "@mui/material";
 import PropTypes from "prop-types";
+import {
+  useUpdateSavedView,
+  useUpdateWorkspaceSavedView,
+} from "src/api/project/saved-views";
+
+const USER_DETAIL_TAB_TYPE = "user_detail";
 import React, {
   lazy,
   Suspense,
@@ -362,6 +368,41 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
     return () => registerGetTabType(null);
   }, [registerGetTabType]);
 
+  // Update mutations for the explicit Save view button. Project-scoped on
+  // ObservePage, workspace-scoped (user_detail) on CrossProjectUserDetailPage.
+  const { mutate: updateSavedView } = useUpdateSavedView(observeId);
+  const { mutate: updateWorkspaceSavedView } =
+    useUpdateWorkspaceSavedView(USER_DETAIL_TAB_TYPE);
+
+  // Active saved-view id from URL — "tab" key on ObservePage, "userTab" on
+  // CrossProjectUserDetailPage. Re-derived when activeViewConfig flips.
+  const activeViewTabId = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const key = isUserMode ? params.get("userTab") : params.get("tab");
+    return key?.startsWith("view-") ? key.slice(5) : null;
+  }, [activeViewConfig, isUserMode]);
+
+  const handleSaveView = useCallback(() => {
+    if (!activeViewTabId) return;
+    const config = buildViewConfig();
+    const mutate = isUserMode ? updateWorkspaceSavedView : updateSavedView;
+    mutate(
+      { id: activeViewTabId, config },
+      {
+        onSuccess: () =>
+          enqueueSnackbar("View updated", { variant: "success" }),
+        onError: () =>
+          enqueueSnackbar("Failed to update view", { variant: "error" }),
+      },
+    );
+  }, [
+    activeViewTabId,
+    buildViewConfig,
+    isUserMode,
+    updateSavedView,
+    updateWorkspaceSavedView,
+  ]);
+
   // Pending column state queued before the grid was ready. Drain effect
   // below applies it once `sessionGridApiRef.current.api` shows up.
   const pendingColumnStateRef = useRef(null);
@@ -639,6 +680,7 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
         // Filter
         hasActiveFilter={hasActiveFilter}
         canSaveView={canSaveViewDeferred}
+        onSaveView={handleSaveView}
         isFilterOpen={isFilterOpen}
         onFilterToggle={() => setIsFilterOpen(!isFilterOpen)}
         filterFields={sessionFilterFields}

@@ -18,6 +18,13 @@ import { useUrlState } from "src/routes/hooks/use-url-state";
 import axios, { endpoints } from "src/utils/axios";
 import { useQuery } from "@tanstack/react-query";
 import { useObserveHeader } from "src/sections/project/context/ObserveHeaderContext";
+import {
+  useUpdateSavedView,
+  useUpdateWorkspaceSavedView,
+} from "src/api/project/saved-views";
+import { enqueueSnackbar } from "notistack";
+
+const USERS_TAB_TYPE = "users";
 
 // Shared observe components
 import ObserveToolbar from "../LLMTracing/ObserveToolbar";
@@ -505,6 +512,44 @@ const UsersView = ({
 
   const canSaveViewDeferred = useDeferredValue(canSaveView);
 
+  // Update mutations for the explicit Save view button. Project-scoped on
+  // ObservePage's Users fixed tab; workspace-scoped (USERS_TAB_TYPE) on the
+  // top-level /dashboard/users page rendered by UserList.
+  const { mutate: updateSavedView } = useUpdateSavedView(observeId);
+  const { mutate: updateWorkspaceSavedView } =
+    useUpdateWorkspaceSavedView(USERS_TAB_TYPE);
+
+  // Active saved-view id from URL — "tab" key on ObservePage, "usersTab" on
+  // UserList. Re-derived when the active config flips.
+  const activeViewTabId = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const key = isObservePath
+      ? params.get("tab")
+      : params.get("usersTab");
+    return key?.startsWith("view-") ? key.slice(5) : null;
+  }, [activeViewConfig, isObservePath]);
+
+  const handleSaveView = useCallback(() => {
+    if (!activeViewTabId) return;
+    const config = getConfig();
+    const mutate = isObservePath ? updateSavedView : updateWorkspaceSavedView;
+    mutate(
+      { id: activeViewTabId, config },
+      {
+        onSuccess: () =>
+          enqueueSnackbar("View updated", { variant: "success" }),
+        onError: () =>
+          enqueueSnackbar("Failed to update view", { variant: "error" }),
+      },
+    );
+  }, [
+    activeViewTabId,
+    getConfig,
+    isObservePath,
+    updateSavedView,
+    updateWorkspaceSavedView,
+  ]);
+
   // Register with ObserveHeaderContext so ObserveTabBar's "+" save flow can
   // snapshot the current Users config when the user is on this fixed tab —
   // without this, the save POSTs `config: {}` (TH-4578).
@@ -571,6 +616,7 @@ const UsersView = ({
         // Filter
         hasActiveFilter={hasActiveFilter}
         canSaveView={canSaveViewDeferred}
+        onSaveView={handleSaveView}
         isFilterOpen={isFilterOpen}
         onFilterToggle={() => setIsFilterOpen(!isFilterOpen)}
         filterFields={USER_FILTER_FIELDS}

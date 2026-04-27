@@ -50,6 +50,7 @@ const ObserveToolbar = ({
   // Filter
   hasActiveFilter,
   canSaveView,
+  onSaveView,
   isFilterOpen,
   onFilterToggle,
   filters,
@@ -468,14 +469,21 @@ const ObserveToolbar = ({
             }}
           />
 
-          {/* Save view — appears when there's any savable state */}
+          {/* Save view — updates the currently-active saved view in place
+              when its state has diverged from the saved baseline. The "+"
+              button in the tab bar handles save-as-new. */}
           {canSaveView && (
             <Button
               variant="outlined"
               size="small"
               startIcon={<Iconify icon="mdi:content-save-outline" width={16} />}
-              onClick={(e) => {
-                // Find the "+" button in the tab bar and click it to open the save view popover
+              onClick={() => {
+                if (typeof onSaveView === "function") {
+                  onSaveView();
+                  return;
+                }
+                // Fallback: open create-new popover via the "+" button if no
+                // explicit save handler was wired (e.g. an older mount path).
                 const createBtn = document.querySelector(
                   "[data-create-view-btn]",
                 );
@@ -575,6 +583,7 @@ ObserveToolbar.propTypes = {
   setDateFilter: PropTypes.func,
   hasActiveFilter: PropTypes.bool,
   canSaveView: PropTypes.bool,
+  onSaveView: PropTypes.func,
   isFilterOpen: PropTypes.bool,
   onFilterToggle: PropTypes.func,
   filters: PropTypes.array,
