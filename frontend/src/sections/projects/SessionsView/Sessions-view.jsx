@@ -70,6 +70,7 @@ import axios, { endpoints } from "src/utils/axios";
 import ColumnConfigureDropDown from "src/sections/project-detail/ColumnDropdown/ColumnConfigureDropDown";
 import useProjectFilterField from "../UsersView/useProjectFilterField";
 import CustomColumnDialog from "../LLMTracing/CustomColumnDialog";
+import { filtersContentEqual } from "../saved-view-utils";
 
 // ---------------------------------------------------------------------------
 // Base session filter fields (always available)
@@ -332,12 +333,12 @@ const SessionsView = ({ mode = "project", userIdForUserMode = null }) => {
   const canSaveView = useMemo(() => {
     if (!activeViewConfig) return false;
 
-    const baselineExtraLen = activeViewConfig.extraFilters?.length ?? 0;
+    const baselineExtraFilters = activeViewConfig.extraFilters || [];
     const baselineDisplay = activeViewConfig.display || {};
     const baselineDateOption =
       baselineDisplay.dateFilter?.dateOption ?? null;
 
-    if ((extraFilters?.length ?? 0) !== baselineExtraLen) return true;
+    if (!filtersContentEqual(extraFilters, baselineExtraFilters)) return true;
     if ((dateFilter?.dateOption ?? null) !== baselineDateOption) return true;
     if (
       baselineDisplay.cellHeight !== undefined &&

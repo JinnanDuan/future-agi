@@ -44,6 +44,7 @@ import { getUsersColumnConfig } from "./common";
 import UsersGrid from "./UsersGrid";
 import UsersEmptyScreen from "./UsersEmptyScreen";
 import { useShallow } from "zustand/react/shallow";
+import { filtersContentEqual } from "../saved-view-utils";
 
 // ---------------------------------------------------------------------------
 // User filter fields for TraceFilterPanel
@@ -447,11 +448,11 @@ const UsersView = ({
 
     const baselineFilters = activeViewConfig.filters || {};
     const baselineDisplay = activeViewConfig.display || {};
-    const baselineExtraLen = baselineFilters.extraFilters?.length ?? 0;
+    const baselineExtraFilters = baselineFilters.extraFilters || [];
     const baselineDateOption =
       baselineFilters.dateFilter?.dateOption ?? null;
 
-    if ((extraFilters?.length ?? 0) !== baselineExtraLen) return true;
+    if (!filtersContentEqual(extraFilters, baselineExtraFilters)) return true;
     if ((dateFilter?.dateOption ?? null) !== baselineDateOption) return true;
     if (
       baselineDisplay.cellHeight !== undefined &&

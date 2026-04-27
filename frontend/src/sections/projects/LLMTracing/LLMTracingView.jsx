@@ -187,6 +187,7 @@ import {
 } from "../SessionsView/ReplaySessions/store";
 import { REPLAY_MODULES } from "../SessionsView/ReplaySessions/configurations";
 import { REPLAY_TYPES } from "../SessionsView/ReplaySessions/constants";
+import { filtersContentEqual } from "../saved-view-utils";
 import { useCreateReplaySessions } from "src/api/project/replay-sessions";
 import { enqueueSnackbar } from "notistack";
 import {
@@ -674,29 +675,82 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
   // grids/queries omit project_id so the backend scopes by org.
   const observeId = isUserMode ? null : routeObserveId;
 
+  // Pulled up out of the larger useObserveHeader() destructure below so
+  // handleGroupByChange (which clears activeViewConfig when navigating off
+  // a saved view) can reference it without a TDZ. Same context call ID,
+  // shape-stable from React.
+  const { setActiveViewConfig: setActiveViewConfigFromCtx } =
+    useObserveHeader();
+
   const handleGroupByChange = useCallback(
     (groupKey) => {
-      // In user mode we're not in a project context, so the cross-route
-      // navigation cases are no-ops.
+      // Group-by changes off a saved view land on the corresponding default
+      // tab — the saved view's filters/columns aren't meaningful for a
+      // different group key, so we drop activeViewConfig and rewrite the
+      // tab URL key. Detect saved view via the URL `tab` (`userTab` in
+      // user mode) — `view-<id>` means we're on a custom saved view.
+      const params = new URLSearchParams(window.location.search);
+      const tabKey = isUserMode ? "userTab" : "tab";
+      const onSavedView = params.get(tabKey)?.startsWith("view-");
+
       switch (groupKey) {
         case "none":
         case "trace":
-          setSelectedTab("trace");
+          if (onSavedView) {
+            setActiveViewConfigFromCtx(null);
+            if (isUserMode) {
+              navigate("?userTab=traces&selectedTab=trace", { replace: true });
+            } else {
+              navigate(
+                `/dashboard/observe/${observeId}/llm-tracing?tab=traces&selectedTab=trace`,
+                { replace: true },
+              );
+            }
+          } else {
+            setSelectedTab("trace");
+          }
           break;
         case "span":
-          setSelectedTab("spans");
+          if (onSavedView) {
+            setActiveViewConfigFromCtx(null);
+            if (isUserMode) {
+              // User Detail has a single "Trace" fixed tab that hosts the
+              // selectedTab toggle, so we land on userTab=traces with
+              // selectedTab=spans.
+              navigate("?userTab=traces&selectedTab=spans", { replace: true });
+            } else {
+              navigate(
+                `/dashboard/observe/${observeId}/llm-tracing?tab=spans&selectedTab=spans`,
+                { replace: true },
+              );
+            }
+          } else {
+            setSelectedTab("spans");
+          }
           break;
         case "users":
-          if (!isUserMode) navigate(`/dashboard/observe/${observeId}/users`);
+          if (!isUserMode) {
+            setActiveViewConfigFromCtx(null);
+            navigate(`/dashboard/observe/${observeId}/users`);
+          }
           break;
         case "sessions":
-          if (!isUserMode) navigate(`/dashboard/observe/${observeId}/sessions`);
+          if (!isUserMode) {
+            setActiveViewConfigFromCtx(null);
+            navigate(`/dashboard/observe/${observeId}/sessions`);
+          }
           break;
         default:
           break;
       }
     },
-    [observeId, navigate, setSelectedTab, isUserMode],
+    [
+      observeId,
+      navigate,
+      setSelectedTab,
+      setActiveViewConfigFromCtx,
+      isUserMode,
+    ],
   );
 
   const [_loading, setLoading] = useState(false);
@@ -1600,16 +1654,38 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
   }, [selectedTab, primaryTraceDateFilter, primarySpanDateFilter]);
 
   // Load filters + display settings from saved view config when a custom view tab is selected
+  // Tracked separately so the null-branch reset only fires on a genuine
+  // saved-view → default transition, not on initial mount where
+  // activeViewConfig is null only because hydration hasn't landed yet.
+  // Without this guard, the destructive resets below clobber state that
+  // the localStorage rehydrate (line 1816) and the apply branch are
+  // about to set from the saved view itself.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const wasOnSavedViewRef = useRef(false);
   useEffect(() => {
     if (!activeViewConfig) {
+      const wasOnSavedView = wasOnSavedViewRef.current;
+      wasOnSavedViewRef.current = false;
+      if (!wasOnSavedView) return; // initial mount / already on default — nothing to clean up
       // Back to a default tab — clear local extraFilters so chips from a
-      // prior custom view don't linger. Intentionally do NOT touch
-      // pendingCustomColumnsRef — the localStorage hydration effect only
-      // queues into it once on mount and we'd erase a still-pending merge
-      // if the backend columns haven't arrived yet.
+      // prior custom view don't linger. URL-synced display state
+      // (cellHeight / showErrors / showNonAnnotated / hasEvalFilter /
+      // showCompare) is wiped via the parent's URL navigation; viewMode
+      // lives in the Zustand store (no URL key) so we reset it explicitly,
+      // and the active grid's columnState (widths/order/sort) is internal
+      // to AG Grid and likewise needs an imperative reset.
       setExtraFilters((prev) => (prev.length === 0 ? prev : []));
+      setViewMode(DEFAULT_DISPLAY_CONFIG.viewMode);
+      pendingColumnStateRef.current = null;
+      pendingCustomColumnsRef.current = [];
+      const activeApi =
+        selectedTab === "trace"
+          ? primaryTraceGridRef.current?.api
+          : primarySpanGridRef.current?.api;
+      if (activeApi?.resetColumnState) activeApi.resetColumnState();
       return;
     }
+    wasOnSavedViewRef.current = true;
 
     if (import.meta.env.MODE !== "production") {
       // eslint-disable-next-line no-console
@@ -2093,13 +2169,11 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
     if (!activeViewConfig) return false;
 
     const baselineDisplay = activeViewConfig.display || {};
-    const baselineExtraLen = activeViewConfig.extraFilters?.length ?? 0;
+    const baselineExtraFilters = activeViewConfig.extraFilters || [];
     const baselineDateOption = baselineDisplay.dateFilter?.dateOption ?? null;
-    const baselineColumnHas = (activeViewConfig.filters ?? []).some(
-      (f) => f?.columnId,
-    );
+    const baselineColumnFilters = activeViewConfig.filters || [];
 
-    if ((extraFilters?.length ?? 0) !== baselineExtraLen) return true;
+    if (!filtersContentEqual(extraFilters, baselineExtraFilters)) return true;
 
     const currentDate =
       selectedTab === "trace" ? primaryTraceDateFilter : primarySpanDateFilter;
@@ -2107,8 +2181,7 @@ const LLMTracingView = ({ mode = "project", userIdForUserMode = null }) => {
 
     const columnFilters =
       selectedTab === "trace" ? primaryTraceFilters : primarySpanFilters;
-    const currentColumnHas = !!columnFilters?.some((f) => f?.columnId);
-    if (currentColumnHas !== baselineColumnHas) return true;
+    if (!filtersContentEqual(columnFilters, baselineColumnFilters)) return true;
 
     if (
       baselineDisplay.viewMode !== undefined &&
