@@ -2043,7 +2043,14 @@ class GetDatasetTableView(APIView):
             # the dataset; use column_order only for sorting.
             column_order = dataset.column_order or []
             column_order_set = set(column_order)
-            all_columns = list(Column.objects.filter(dataset=dataset, deleted=False))
+            qs = Column.objects.filter(dataset=dataset, deleted=False)
+            if dataset.source != DatasetSourceChoices.EXPERIMENT_SNAPSHOT.value:
+                qs = qs.exclude(source__in=[
+                    SourceChoices.EXPERIMENT.value,
+                    SourceChoices.EXPERIMENT_EVALUATION.value,
+                    SourceChoices.EXPERIMENT_EVALUATION_TAGS.value,
+                ])
+            all_columns = list(qs)
             columns_map = {str(col.id): col for col in all_columns}
 
             # Names of EVALUATION_REASON columns in this dataset. Reason columns
@@ -2683,7 +2690,14 @@ class GetRowDataView(APIView):
             error_messages = []
             cells = Cell.objects.filter(row__in=rows, deleted=False)
             column_order = dataset.column_order or []
-            all_columns = list(Column.objects.filter(dataset=dataset, deleted=False))
+            qs = Column.objects.filter(dataset=dataset, deleted=False)
+            if dataset.source != DatasetSourceChoices.EXPERIMENT_SNAPSHOT.value:
+                qs = qs.exclude(source__in=[
+                    SourceChoices.EXPERIMENT.value,
+                    SourceChoices.EXPERIMENT_EVALUATION.value,
+                    SourceChoices.EXPERIMENT_EVALUATION_TAGS.value,
+                ])
+            all_columns = list(qs)
             columns_map = {str(col.id): col for col in all_columns}
 
             # Apply filters if any
@@ -6065,6 +6079,11 @@ class DownloadDatasetView(APIView):
             dataset = get_object_or_404(Dataset, id=dataset_id)
 
             # Get all columns in the correct order
+            _exp_sources = [
+                SourceChoices.EXPERIMENT.value,
+                SourceChoices.EXPERIMENT_EVALUATION.value,
+                SourceChoices.EXPERIMENT_EVALUATION_TAGS.value,
+            ]
             column_order = dataset.column_order or []
             if column_order:
                 from django.db.models import Case, IntegerField, Value, When
@@ -6088,6 +6107,8 @@ class DownloadDatasetView(APIView):
                 columns = Column.objects.filter(
                     dataset_id=dataset_id, deleted=False
                 ).order_by("id")
+            if dataset.source != DatasetSourceChoices.EXPERIMENT_SNAPSHOT.value:
+                columns = columns.exclude(source__in=_exp_sources)
 
             # Create DataFrame
             rows = Row.objects.filter(dataset=dataset, deleted=False).order_by("order")
@@ -11447,6 +11468,7 @@ class GetBaseColumnsView(APIView):
 
             # Get all columns per dataset in a single query
             excluded_sources = [
+                SourceChoices.EXPERIMENT.value,
                 SourceChoices.EXPERIMENT_EVALUATION_TAGS.value,
                 SourceChoices.EVALUATION_TAGS.value,
                 SourceChoices.OPTIMISATION_EVALUATION_TAGS.value,
