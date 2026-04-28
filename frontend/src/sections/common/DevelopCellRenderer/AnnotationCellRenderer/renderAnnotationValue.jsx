@@ -2,8 +2,6 @@ import { Chip, Stack } from "@mui/material";
 import React from "react";
 import Iconify from "src/components/iconify";
 
-const STAR_MAX = 5;
-
 export const parseAnnotationValue = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value !== "string" || !value) return value;
@@ -39,19 +37,17 @@ export const renderAnnotationValue = (value, theme) => {
       return renderChips(parsed.selected, theme);
 
     if (typeof parsed.rating === "number") {
+      const count = Math.max(0, Math.floor(parsed.rating));
       return (
         <Stack direction="row" spacing={0.25} alignItems="center">
-          {Array.from({ length: STAR_MAX }, (_, i) => {
-            const filled = i + 1 <= parsed.rating;
-            return (
-              <Iconify
-                key={i}
-                icon={filled ? "solar:star-bold" : "solar:star-line-duotone"}
-                width={18}
-                sx={{ color: filled ? "#ef4444" : "text.disabled" }}
-              />
-            );
-          })}
+          {Array.from({ length: count }, (_, i) => (
+            <Iconify
+              key={i}
+              icon="solar:star-bold"
+              width={18}
+              sx={{ color: "#ef4444" }}
+            />
+          ))}
         </Stack>
       );
     }
